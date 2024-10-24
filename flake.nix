@@ -1,35 +1,56 @@
 {
   description = "A flake for running Whisper with MPS (Metal Performance Shaders) support on Mac (Apple Silicon)";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";  # Use an up-to-date nixpkgs
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
-  outputs = { self, nixpkgs }: {
-    # Define the function for the devShell
-    devShells = let
-      # Define a common function for the dev environments
-      mkCommonDevShell = platform: nixpkgs.legacyPackages.${platform}.mkShell {
-        buildInputs = with nixpkgs.legacyPackages.${platform}; [
-          python310               # Python 3.10
-          python310Packages.pip    # Pip for package management
-          python310Packages.whisper  # Whisper for transcription
-          python310Packages.torch  # PyTorch (with MPS backend support)
-          python310Packages.torchaudio  # Torchaudio for audio processing
-          ffmpeg                  # Needed for handling audio/video formats
-        ];
+  outputs = { self, nixpkgs }: let
+    supportedSystems = [ "x86_64-darwin" "aarch64-darwin" ];
+    forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
 
-        shellHook = ''
-          echo -e "\033[33mEnvironment for Whisper and PyTorch with MPS on Mac is ready!\033[0m"
-        '';
+    mkCommonDevShell = system: let
+      pkgs = import nixpkgs {
+        inherit system;
+        config.allowUnfree = true;
       };
-    in {
-      # Define the environments for both platforms
-      x86_64-darwin = mkCommonDevShell "x86_64-darwin";
-      aarch64-darwin = mkCommonDevShell "aarch64-darwin";
-    };
+    in pkgs.mkShell {
+      # Absolute minimum Nix-managed dependencies
+      buildInputs = with pkgs; [
+        python310
+        ffmpeg
+      ];
 
-    # Define the default devShell for the current platform
-    devShell = nixpkgs.mkShell {
-      inherit (devShells) aarch64-darwin;
+      shellHook = ''
+        # Set up virtual environment if it doesn't exist
+        if [ ! -d .venv ]; then
+          echo "Creating new Python virtual environment..."
+          python -m venv .venv
+        fi
+
+        # Activate virtual environment
+        source .venv/bin/activate
+
+        # Install Python packages if needed
+        if [ ! -f .venv/.packages-installed ]; then
+          echo "Installing Python packages..."
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision torchaudio
+          python -m pip install openai-whisper
+          # Mark packages as installed
+          touch .venv/.packages-installed
+        fi
+
+        echo -e "\033[33mWhisper environment ready with MPS support!\033[0m"
+        echo "Python: $(python --version)"
+        echo "Torch: $(python -c 'import torch; print(f"PyTorch {torch.__version__}")')"
+        echo "MPS available: $(python -c 'import torch; print(torch.backends.mps.is_available())')"
+
+        # Add .venv/bin to PATH
+        export PATH="$PWD/.venv/bin:$PATH"
+      '';
     };
+  in {
+    devShells = forAllSystems (system: {
+      default = mkCommonDevShell system;
+    });
   };
 }

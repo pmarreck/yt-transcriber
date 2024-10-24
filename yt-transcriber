@@ -1,0 +1,357 @@
+#!/usr/bin/env bash
+# yt-transcriber
+
+set -Eeuo pipefail
+
+# Debug function
+debug() {
+  if [ -n "${DEBUG:-}" ]; then
+    echo -e "\033[1;33mDEBUG: $*\033[0m" >&2
+  fi
+}
+
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORK_DIR=""
+DEFAULT_WHISPER_MODEL="base"
+debug "Script directory: $SCRIPT_DIR"
+debug "Whisper model: $DEFAULT_WHISPER_MODEL"
+
+# Function to show usage
+show_usage() {
+  echo "Usage: $(basename "$0") [options] <youtube-url>"
+  echo "Options:"
+  echo "  -m, --model MODEL    Whisper model to use (base|small|medium|large|large-v2)"
+  echo "                       Default: base"
+  echo "  -h, --help           Show this help message"
+}
+
+# Function to get file modification time in a cross-platform way
+get_file_mtime() {
+  local file="$1"
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    # macOS version
+    stat -f "%m" "$file"
+  else
+    # Linux version
+    stat -c "%Y" "$file"
+  fi
+}
+
+# Create a safe temporary directory
+create_safe_tempdir() {
+  local temp_dir
+
+  # Create temp directory with mktemp
+  temp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t 'yttmp')
+  debug "mktemp created directory: $temp_dir"
+
+  if [ ! -d "$temp_dir" ]; then
+    echo "Error: Failed to create temporary directory" >&2
+    exit 1
+  fi
+
+  # Just ensure it's an absolute path and not any of our forbidden paths
+  if [[ "$temp_dir" = "/" ]] || [[ "$temp_dir" = "$HOME" ]] || [[ ! "$temp_dir" = /* ]]; then
+    debug "ERROR: Unsafe temporary directory path: $temp_dir"
+    echo "Error: Unsafe temporary directory created" >&2
+    exit 1
+  fi
+
+  # Set restrictive permissions
+  chmod 700 "$temp_dir"
+
+  echo "$temp_dir"
+}
+
+# Function to validate YouTube URL
+validate_youtube_url() {
+  local url="$1"
+  if ! echo "$url" | grep -qE '^https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+'; then
+    echo "Invalid YouTube URL" >&2
+    return 1
+  fi
+}
+
+# Function to extract YouTube ID from URL
+get_youtube_id() {
+  local url="$1"
+  local id
+
+  if [[ $url =~ ^https?://[^/]*youtube\.com/watch\?v=([a-zA-Z0-9_-]+) ]]; then
+    id="${BASH_REMATCH[1]}"
+  elif [[ $url =~ ^https?://[^/]*youtu\.be/([a-zA-Z0-9_-]+) ]]; then
+    id="${BASH_REMATCH[1]}"
+  else
+    return 1
+  fi
+
+  echo "$id"
+}
+
+# Function to ensure cache directory exists
+ensure_cache_dir() {
+  local cache_dir="/tmp/yt-transcriber"
+  if [ ! -d "$cache_dir" ]; then
+    debug "Creating cache directory"
+    mkdir -p "$cache_dir"
+    chmod 755 "$cache_dir"
+  fi
+  echo "$cache_dir"
+}
+
+# Function to get cached audio path
+get_cache_path() {
+  local youtube_id="$1"
+  local cache_dir
+  cache_dir=$(ensure_cache_dir)
+  echo "${cache_dir}/${youtube_id}.mp3"
+}
+
+# Function to set up Python environment
+setup_python_env() {
+  if [ ! -d ".venv" ]; then
+    echo "Error: Python virtual environment not found. Please run 'nix develop' first." >&2
+    exit 1
+  fi
+  source .venv/bin/activate
+}
+
+# Function to install required Python packages
+install_python_packages() {
+  python -m pip install -q yt-dlp
+}
+
+# Mock download function for testing
+mock_download_audio() {
+  local url="$1"
+  local output_dir="$2"
+  debug "Mock download called with URL: $url, output dir: $output_dir"
+  echo "Mock download completed (testing mode)"
+  return 0
+}
+
+# Function to download YouTube audio
+download_audio() {
+  local url="$1"
+  local output_dir="$2"
+  local youtube_id
+  local cache_path
+  local output_file="${output_dir}/audio.mp3"
+  local metadata_file="${output_dir}/metadata.json"
+
+  # Get YouTube ID and cache path
+  youtube_id=$(get_youtube_id "$url")
+  cache_path=$(get_cache_path "$youtube_id")
+
+  # First get metadata regardless of cache status
+  echo "Fetching video metadata..." >&2
+  if ! yt-dlp \
+    --no-progress \
+    --quiet \
+    --dump-json \
+    "$url" > "$metadata_file"; then
+    echo "Error: Failed to fetch metadata" >&2
+    return 1
+  fi
+
+  # If cache exists, use it
+  if [ -f "$cache_path" ]; then
+    debug "Found cached audio at $cache_path"
+    echo "Using cached audio from previous download" >&2
+    cp "$cache_path" "$output_file"
+    return 0
+  fi
+
+  # Otherwise download
+  echo "Downloading from YouTube..." >&2
+  if ! yt-dlp \
+    --no-progress \
+    --quiet \
+    --extract-audio \
+    --audio-format mp3 \
+    --audio-quality 0 \
+    --output "$cache_path" \
+    "$url"; then
+    echo "Error: Failed to download audio" >&2
+    return 1
+  fi
+
+  if [ ! -f "$cache_path" ]; then
+    echo "Error: Download completed but audio file not found" >&2
+    return 1
+  fi
+
+  cp "$cache_path" "$output_file"
+
+  echo "Downloaded audio: ${output_file}" >&2
+  return 0
+}
+
+# Function to transcribe audio file
+transcribe_audio() {
+  local audio_file="$1"
+  local output_dir="$2"
+  local model="${3:-$DEFAULT_WHISPER_MODEL}"
+  local transcript_file="${output_dir}/transcript.txt"
+  local metadata_file="${output_dir}/metadata.json"
+
+  debug "Transcribing audio file: $audio_file with model: $model"
+  echo "Generating transcript using ${model} model..." >&2
+
+  if ! python -c 'import whisper' 2>/dev/null; then
+    debug "Installing whisper..."
+    python -m pip install -q openai-whisper >&2
+  fi
+
+  if ! python - "$audio_file" "$transcript_file" "$model" "$metadata_file" <<'EOF'
+import sys
+import json
+import whisper
+import warnings
+from datetime import datetime
+
+# Filter out the specific PyTorch warning
+warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
+
+def format_duration(seconds):
+    minutes, seconds = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+def transcribe(audio_file, output_file, model_name, metadata_file):
+    # Load metadata
+    with open(metadata_file) as f:
+        metadata = json.load(f)
+
+    # Print metadata header
+    print("=== Video Metadata ===")
+    print(f"Title: {metadata['title']}")
+    print(f"Channel: {metadata['channel']}")
+    print(f"Upload Date: {metadata['upload_date']}")
+    print(f"Duration: {format_duration(metadata['duration'])}")
+    print(f"URL: {metadata['webpage_url']}")
+    print("=== Transcript ===")
+    print()
+
+    # Load model and transcribe
+    print(f"Loading {model_name} model...", file=sys.stderr)
+    model = whisper.load_model(model_name)
+    print(f"Model loaded, transcribing...", file=sys.stderr)
+
+    result = model.transcribe(
+        audio_file,
+        fp16=False,
+        language='en'
+    )
+
+    transcript = result["text"].strip()
+
+    # Write complete output (metadata + transcript) to file and stdout
+    output = (
+        f"=== Video Metadata ===\n"
+        f"Title: {metadata['title']}\n"
+        f"Channel: {metadata['channel']}\n"
+        f"Upload Date: {metadata['upload_date']}\n"
+        f"Duration: {format_duration(metadata['duration'])}\n"
+        f"URL: {metadata['webpage_url']}\n"
+        f"=== Transcript ===\n\n"
+        f"{transcript}\n"
+    )
+
+    with open(output_file, 'w') as f:
+        f.write(output)
+
+    print(output)
+
+    # Print model info to stderr
+    import os
+    cache_dir = os.path.expanduser("~/.cache/whisper")
+    print(f"Model stored in: {cache_dir}", file=sys.stderr)
+    model_size = os.path.getsize(os.path.join(cache_dir, f"{model_name}.pt")) / 1024 / 1024
+    print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
+
+if __name__ == "__main__":
+    transcribe(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+EOF
+  then
+    echo "Error: Transcription failed" >&2
+    return 1
+  fi
+}
+
+# Main function
+main() {
+  local model="$DEFAULT_WHISPER_MODEL"
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -m|--model)
+        shift
+        if [[ "$1" =~ ^(base|small|medium|large|large-v2)$ ]]; then
+          model="$1"
+        else
+          echo "Error: Invalid model '$1'" >&2
+          show_usage
+          exit 1
+        fi
+        shift
+        ;;
+      -h|--help)
+        show_usage
+        exit 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  # Check for YouTube URL
+  if [ $# -eq 0 ]; then
+    debug "No arguments provided, showing usage"
+    show_usage
+    exit 1
+  fi
+
+  # Rest of main function...
+  debug "Using model: $model"
+
+  # Validate URL
+  debug "Validating URL: $1"
+  validate_youtube_url "$1"
+
+  # Create working directory safely
+  debug "Creating working directory"
+  WORK_DIR=$(create_safe_tempdir)
+  debug "Created working directory: $WORK_DIR"
+
+  echo "Working directory: $WORK_DIR" >&2
+
+  # Only set up Python and install packages if we're not in mock mode
+  if [ "${MOCK_DOWNLOAD:-false}" != "true" ]; then
+    debug "Setting up Python environment (not in mock mode)"
+    setup_python_env
+    install_python_packages
+  else
+    debug "Skipping Python setup (mock mode)"
+  fi
+
+  # Download audio
+  debug "Starting download process"
+  download_audio "$1" "$WORK_DIR" >&2
+  debug "Download process completed"
+
+  # Transcribe the audio
+  debug "Starting transcription process"
+  transcribe_audio "${WORK_DIR}/audio.mp3" "$WORK_DIR" "$model"
+  debug "Transcription process completed"
+}
+
+# Run main if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
