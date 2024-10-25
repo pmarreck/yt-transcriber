@@ -32,6 +32,8 @@ By default the app uses the `base` (smallest) model; I recommend going to at lea
 
 Transcript will be sent to stdout, so you can redirect it to a file or pipe it to another program.
 
+If you set the `DEBUG` env var, you'll get additional logging/debug info to stderr.
+
 ```bash
 ./yt-transcriber -m small "https://www.youtube.com/watch?v=<youtube_id>" > ~/Documents/transcript.txt
 ```

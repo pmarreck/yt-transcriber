@@ -122,6 +122,116 @@ install_python_packages() {
   python -m pip install -q yt-dlp
 }
 
+# Function to invoke our Python helper
+py_helper() {
+  local cmd="$1"
+  shift
+
+  python3 - "$cmd" "$@" <<'PYEOF'
+import sys
+import json
+import subprocess
+from pathlib import Path
+
+def get_audio_samples(audio_file):
+    """Get exact sample count using ffmpeg"""
+    cmd = ['ffmpeg', '-i', audio_file, '-af', 'asetnsamples=n=44100',
+           '-f', 'null', '-']
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, stderr=subprocess.PIPE)
+        debug_info = f"ffmpeg stderr output:\n{result.stderr}"
+
+        # Parse ffmpeg output to get sample count
+        for line in result.stderr.splitlines():
+            if "time=" in line:  # ffmpeg reports progress with time=
+                # Extract time in seconds
+                time_str = line.split("time=")[1].split()[0]
+                hours, minutes, seconds = map(float, time_str.split(':'))
+                return hours * 3600 + minutes * 60 + seconds
+
+        print(f"Debug: Could not find time in ffmpeg output.\n{debug_info}",
+              file=sys.stderr)
+        raise ValueError("Could not determine audio length from samples")
+
+    except Exception as e:
+        print(f"Debug: Sample counting failed: {str(e)}", file=sys.stderr)
+        return None
+
+def verify_durations(audio_file, expected_duration, tolerance=1.0):
+    """Compare audio duration with expected duration"""
+    # Try sample counting first
+    sample_duration = get_audio_samples(audio_file)
+
+    if sample_duration is not None:
+        diff = abs(sample_duration - float(expected_duration))
+        return {
+            'match': diff <= tolerance,
+            'actual': sample_duration,
+            'expected': float(expected_duration),
+            'difference': diff,
+            'method': 'sample_count'
+        }
+
+    # Fallback to ffprobe
+    cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+           '-of', 'default=noprint_wrappers=1:nokey=1', audio_file]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    actual_duration = float(result.stdout.strip())
+    diff = abs(actual_duration - float(expected_duration))
+
+    return {
+        'match': diff <= tolerance,
+        'actual': actual_duration,
+        'expected': float(expected_duration),
+        'difference': diff,
+        'method': 'ffprobe_fallback'
+    }
+
+def get_video_duration(metadata_file):
+    """Get video duration from metadata JSON"""
+    with open(metadata_file) as f:
+        return json.load(f)['duration']
+
+if __name__ == "__main__":
+    cmd = sys.argv[1]
+
+    if cmd == "verify_duration":
+        # Args: audio_file expected_duration
+        result = verify_durations(sys.argv[2], sys.argv[3])
+        print(json.dumps(result))
+
+    elif cmd == "get_video_duration":
+        # Args: metadata_file
+        duration = get_video_duration(sys.argv[2])
+        print(duration)
+PYEOF
+}
+
+# Function to check audio duration using ffprobe
+get_audio_duration() {
+  local audio_file="$1"
+  ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file"
+}
+
+# Function to verify audio length
+verify_audio() {
+  local audio_file="$1"
+  local expected_duration="$2"
+  local duration_info
+
+  duration_info=$(py_helper verify_duration "$audio_file" "$expected_duration")
+  debug "Duration check result: $duration_info"
+
+  if [[ $(echo "$duration_info" | jq -r '.match') == "true" ]]; then
+    return 0
+  else
+    local actual
+    actual=$(echo "$duration_info" | jq -r '.actual')
+    echo "Warning: Audio duration (${actual}s) differs significantly from video duration (${expected_duration}s)" >&2
+    return 1
+  fi
+}
+
 # Mock download function for testing
 mock_download_audio() {
   local url="$1"
@@ -146,33 +256,42 @@ download_audio() {
 
   # First get metadata regardless of cache status
   echo "Fetching video metadata..." >&2
-  if ! yt-dlp \
-    --no-progress \
-    --quiet \
-    --dump-json \
-    "$url" > "$metadata_file"; then
+  if ! yt-dlp --no-progress --quiet --dump-json "$url" > "$metadata_file"; then
     echo "Error: Failed to fetch metadata" >&2
     return 1
   fi
 
-  # If cache exists, use it
+  # Get video duration from metadata using Python
+  local video_duration
+  video_duration=$(py_helper get_video_duration "$metadata_file")
+  debug "Video duration: ${video_duration}s"
+
+  # If cache exists, verify it
   if [ -f "$cache_path" ]; then
     debug "Found cached audio at $cache_path"
-    echo "Using cached audio from previous download" >&2
-    cp "$cache_path" "$output_file"
-    return 0
+    if verify_audio "$cache_path" "$video_duration"; then
+      echo "Using cached audio from previous download" >&2
+      cp "$cache_path" "$output_file"
+      return 0
+    else
+      debug "Cached audio is incomplete, re-downloading"
+      rm -f "$cache_path"
+    fi
   fi
 
-  # Otherwise download
+  # Download with more reliable audio extraction options
   echo "Downloading from YouTube..." >&2
   if ! yt-dlp \
-    --no-progress \
-    --quiet \
-    --extract-audio \
-    --audio-format mp3 \
-    --audio-quality 0 \
-    --output "$cache_path" \
-    "$url"; then
+       --no-progress \
+       --quiet \
+       --extract-audio \
+       --audio-format mp3 \
+       --audio-quality 0 \
+       --force-overwrites \
+       --postprocessor-args "ffmpeg:-ar 44100" \
+       --output "$cache_path" \
+       "$url"
+  then
     echo "Error: Failed to download audio" >&2
     return 1
   fi
@@ -182,9 +301,38 @@ download_audio() {
     return 1
   fi
 
-  cp "$cache_path" "$output_file"
+  # Verify downloaded audio
+  if ! verify_audio "$cache_path" "$video_duration"; then
+    echo "Error: Downloaded audio appears to be incomplete, trying alternate method..." >&2
 
-  echo "Downloaded audio: ${output_file}" >&2
+    # Try alternate download method (downloading video first, then extracting audio)
+    rm -f "$cache_path"
+    if ! yt-dlp \
+         --no-progress \
+         --quiet \
+         --format bestvideo+bestaudio \
+         --extract-audio \
+         --audio-format mp3 \
+         --audio-quality 0 \
+         --force-overwrites \
+         --postprocessor-args "ffmpeg:-ar 44100" \
+         --output "$cache_path" \
+         "$url"
+    then
+      echo "Error: Alternate download method failed" >&2
+      return 1
+    fi
+
+    # Final verification
+    if ! verify_audio "$cache_path" "$video_duration"; then
+      echo "Error: Still unable to get complete audio" >&2
+      return 1
+    fi
+  fi
+
+  cp "$cache_path" "$output_file"
+  debug "Downloaded audio file matches video duration"
+
   return 0
 }
 
@@ -295,8 +443,8 @@ main() {
           model="$1"
         else
           echo "Error: Invalid model '$1'" >&2
-          show_usage
-          exit 1
+          show_usage >&2
+          exit 2
         fi
         shift
         ;;
@@ -313,8 +461,8 @@ main() {
   # Check for YouTube URL
   if [ $# -eq 0 ]; then
     debug "No arguments provided, showing usage"
-    show_usage
-    exit 1
+    show_usage >&2
+    exit 2
   fi
 
   # Rest of main function...
