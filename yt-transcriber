@@ -500,10 +500,17 @@ import sys
 import json
 import whisper
 import warnings
+import time
+import torch
 from datetime import datetime
+import psutil
 
-# Filter out the specific PyTorch warning
-warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
+def get_system_info():
+    return {
+        'cpu_cores': psutil.cpu_count(logical=False),
+        'cpu_threads': psutil.cpu_count(logical=True),
+        'memory_gb': psutil.virtual_memory().total / (1024**3)
+    }
 
 def format_duration(seconds):
     minutes, seconds = divmod(int(seconds), 60)
@@ -513,20 +520,67 @@ def format_duration(seconds):
     return f"{minutes}:{seconds:02d}"
 
 def transcribe(audio_file, output_file, model_name, metadata_file):
+    # Filter out warnings
+    warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+    # System info
+    sys_info = get_system_info()
+    print("\n=== System Information ===", file=sys.stderr)
+    print(f"CPU Cores: {sys_info['cpu_cores']}", file=sys.stderr)
+    print(f"CPU Threads: {sys_info['cpu_threads']}", file=sys.stderr)
+    print(f"Memory: {sys_info['memory_gb']:.1f}GB", file=sys.stderr)
+    print(f"PyTorch version: {torch.__version__}", file=sys.stderr)
+    print(f"PyTorch CUDA available: {torch.cuda.is_available()}", file=sys.stderr)
+    print(f"MPS available: {torch.backends.mps.is_available()}", file=sys.stderr)
+    print(f"MPS built: {torch.backends.mps.is_built()}", file=sys.stderr)
+
     # Load metadata
     with open(metadata_file) as f:
         metadata = json.load(f)
 
+    # Try to enable MPS
+    humanized_device = "CPU"
+    try:
+        if torch.backends.mps.is_available():
+            print("\nAttempting to use Metal acceleration...", file=sys.stderr)
+            device = torch.device("mps")
+            # Create a small tensor to test MPS
+            test_tensor = torch.ones(1).to(device)
+            print("✓ Metal acceleration enabled", file=sys.stderr)
+            humanized_device = "GPU"
+        else:
+            device = torch.device("cpu")
+            print("\nFalling back to CPU only", file=sys.stderr)
+    except Exception as e:
+        device = torch.device("cpu")
+        print(f"\nError setting up Metal: {str(e)}", file=sys.stderr)
+        print("Falling back to CPU", file=sys.stderr)
+
+    # Print model info to stderr
+    import os
+    cache_dir = os.path.expanduser("~/.cache/whisper")
+    print(f"Model stored in: {cache_dir}", file=sys.stderr)
+    model_size = os.path.getsize(os.path.join(cache_dir, f"{model_name}.pt")) / 1024 / 1024
+    print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
+
     # Load model and transcribe
-    print(f"Loading {model_name} model...", file=sys.stderr)
+    print(f"Loading {model_name} model into {humanized_device}...", file=sys.stderr)
     model = whisper.load_model(model_name)
     print(f"Model loaded, transcribing...", file=sys.stderr)
+
+    # Time the transcription
+    start_time = time.time()
 
     result = model.transcribe(
         audio_file,
         fp16=False,
         language='en'
     )
+
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"Transcription completed in {duration:.2f} seconds", file=sys.stderr)
 
     transcript = result["text"].strip()
 
@@ -546,13 +600,6 @@ def transcribe(audio_file, output_file, model_name, metadata_file):
         f.write(output)
 
     print(output)
-
-    # Print model info to stderr
-    import os
-    cache_dir = os.path.expanduser("~/.cache/whisper")
-    print(f"Model stored in: {cache_dir}", file=sys.stderr)
-    model_size = os.path.getsize(os.path.join(cache_dir, f"{model_name}.pt")) / 1024 / 1024
-    print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
 
 if __name__ == "__main__":
     transcribe(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])

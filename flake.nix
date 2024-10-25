@@ -35,6 +35,7 @@
           python -m pip install --upgrade pip
           python -m pip install torch torchvision torchaudio
           python -m pip install openai-whisper
+          python -m pip install psutil
           # Mark packages as installed
           touch .venv/.packages-installed
         fi
