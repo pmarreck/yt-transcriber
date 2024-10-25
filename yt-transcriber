@@ -15,15 +15,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR=""
 DEFAULT_WHISPER_MODEL="base"
 debug "Script directory: $SCRIPT_DIR"
-debug "Whisper model: $DEFAULT_WHISPER_MODEL"
 
 # Function to show usage
 show_usage() {
-  echo "Usage: $(basename "$0") [options] <youtube-url>"
+  echo "Usage: $(basename "$0") [options] <youtube-url|media-file>"
   echo "Options:"
   echo "  -m, --model MODEL    Whisper model to use (base|small|medium|large|large-v2)"
-  echo "                       Default: base"
-  echo "  -h, --help           Show this help message"
+  echo "                       Default: $DEFAULT_WHISPER_MODEL"
+  echo "  -h, --help          Show this help message"
+  echo
+  echo "Input can be either:"
+  echo "  - A YouTube URL"
+  echo "  - Path to an audio file (.mp3, .wav, .ogg, .aac, .flac, etc.)"
+  echo "  - Path to a video file (.mp4, .mkv, .webm, .avi, etc.)"
+  echo "  Any format supported by ffmpeg should work"
 }
 
 # Function to get file modification time in a cross-platform way
@@ -67,26 +72,55 @@ create_safe_tempdir() {
 # Function to validate YouTube URL
 validate_youtube_url() {
   local url="$1"
-  if ! echo "$url" | grep -qE '^https?://(www\.)?(youtube\.com/watch\?v=|youtu\.be/)[a-zA-Z0-9_-]+'; then
+  local sanitized_url
+
+  if ! sanitized_url=$(sanitize_youtube_url "$url"); then
     echo "Invalid YouTube URL" >&2
     return 1
   fi
+
+  if ! get_youtube_id "$sanitized_url" > /dev/null; then
+    echo "Could not extract YouTube ID" >&2
+    return 1
+  fi
+
+  return 0
 }
 
-# Function to extract YouTube ID from URL
-get_youtube_id() {
+# Function to sanitize YouTube URL to canonical form with only v= parameter
+sanitize_youtube_url() {
   local url="$1"
-  local id
+  local clean_url
 
-  if [[ $url =~ ^https?://[^/]*youtube\.com/watch\?v=([a-zA-Z0-9_-]+) ]]; then
-    id="${BASH_REMATCH[1]}"
-  elif [[ $url =~ ^https?://[^/]*youtu\.be/([a-zA-Z0-9_-]+) ]]; then
-    id="${BASH_REMATCH[1]}"
+  # Convert youtu.be URLs to youtube.com format first
+  if [[ $url =~ ^https?://[^/]*youtu\.be/([^?&#]+) ]]; then
+    clean_url="https://youtube.com/watch?v=${BASH_REMATCH[1]}"
+  elif [[ $url =~ ^https?://[^/]*youtube\.com/watch ]]; then
+    # Extract the v parameter
+    if [[ $url =~ [?\&]v=([^&#]+) ]]; then
+      clean_url="https://youtube.com/watch?v=${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
   else
     return 1
   fi
 
-  echo "$id"
+  debug "Sanitized URL: $clean_url"
+  echo "$clean_url"
+}
+
+# Function to extract just the YouTube ID from a sanitized URL
+get_youtube_id() {
+  local url="$1"
+
+  # We expect a clean URL in the form https://youtube.com/watch?v=ID
+  if [[ $url =~ [?\&]v=([^&#]+) ]]; then
+    echo "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
 }
 
 # Function to ensure cache directory exists
@@ -133,59 +167,75 @@ import json
 import subprocess
 from pathlib import Path
 
-def get_audio_samples(audio_file):
-    """Get exact sample count using ffmpeg"""
-    cmd = ['ffmpeg', '-i', audio_file, '-af', 'asetnsamples=n=44100',
-           '-f', 'null', '-']
+def get_audio_duration(audio_file):
+    """Get exact audio duration using ffmpeg"""
+    cmd = [
+        'ffmpeg',
+        '-i', audio_file,
+        '-map', '0:a:0',  # Select first audio stream
+        '-f', 'null',
+        '-progress', 'pipe:1',  # Output progress to stdout
+        '-'
+    ]
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, stderr=subprocess.PIPE)
-        debug_info = f"ffmpeg stderr output:\n{result.stderr}"
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding='utf-8'
+        )
 
-        # Parse ffmpeg output to get sample count
-        for line in result.stderr.splitlines():
-            if "time=" in line:  # ffmpeg reports progress with time=
-                # Extract time in seconds
-                time_str = line.split("time=")[1].split()[0]
-                hours, minutes, seconds = map(float, time_str.split(':'))
-                return hours * 3600 + minutes * 60 + seconds
+        # Extract the last time value from progress output
+        last_time = None
+        for line in result.stdout.splitlines():
+            if line.startswith('out_time_us='):
+                # Convert microseconds to seconds
+                last_time = int(line.split('=')[1]) / 1000000
 
-        print(f"Debug: Could not find time in ffmpeg output.\n{debug_info}",
-              file=sys.stderr)
-        raise ValueError("Could not determine audio length from samples")
+        if last_time is not None:
+            return last_time
+
+        # If we couldn't get the duration, print debug info
+        print(f"Debug: ffmpeg stdout:\n{result.stdout}", file=sys.stderr)
+        print(f"Debug: ffmpeg stderr:\n{result.stderr}", file=sys.stderr)
+        raise ValueError("Could not determine duration from ffmpeg output")
 
     except Exception as e:
-        print(f"Debug: Sample counting failed: {str(e)}", file=sys.stderr)
+        print(f"Debug: Duration check failed: {str(e)}", file=sys.stderr)
         return None
 
 def verify_durations(audio_file, expected_duration, tolerance=1.0):
     """Compare audio duration with expected duration"""
-    # Try sample counting first
-    sample_duration = get_audio_samples(audio_file)
+    try:
+        actual_duration = get_audio_duration(audio_file)
+        if actual_duration is None:
+            raise ValueError("Could not get audio duration")
 
-    if sample_duration is not None:
-        diff = abs(sample_duration - float(expected_duration))
+        diff = abs(actual_duration - float(expected_duration))
         return {
             'match': diff <= tolerance,
-            'actual': sample_duration,
+            'actual': actual_duration,
             'expected': float(expected_duration),
             'difference': diff,
-            'method': 'sample_count'
+            'method': 'ffmpeg_progress'
         }
-
-    # Fallback to ffprobe
-    cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
-           '-of', 'default=noprint_wrappers=1:nokey=1', audio_file]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    actual_duration = float(result.stdout.strip())
-    diff = abs(actual_duration - float(expected_duration))
-
-    return {
-        'match': diff <= tolerance,
-        'actual': actual_duration,
-        'expected': float(expected_duration),
-        'difference': diff,
-        'method': 'ffprobe_fallback'
-    }
+    except Exception as e:
+        print(f"Falling back to ffprobe due to: {str(e)}", file=sys.stderr)
+        # Fallback to ffprobe
+        cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+               '-of', 'default=noprint_wrappers=1:nokey=1', audio_file]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        actual_duration = float(result.stdout.strip())
+        diff = abs(actual_duration - float(expected_duration))
+        return {
+            'match': diff <= tolerance,
+            'actual': actual_duration,
+            'expected': float(expected_duration),
+            'difference': diff,
+            'method': 'ffprobe_fallback'
+        }
 
 def get_video_duration(metadata_file):
     """Get video duration from metadata JSON"""
@@ -205,6 +255,68 @@ if __name__ == "__main__":
         duration = get_video_duration(sys.argv[2])
         print(duration)
 PYEOF
+}
+
+# Function to check if file is valid audio or video
+is_valid_media() {
+  local file="$1"
+  local mime_type
+
+  # Check if file exists and is a file
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+
+  # Use file command to check MIME type
+  mime_type=$(file --mime-type -b "$file")
+  debug "MIME type for $file: $mime_type"
+
+  case "$mime_type" in
+    audio/*|video/*) return 0 ;;  # Any audio or video MIME type is valid
+    *)
+      # Additional check with ffprobe in case MIME type is ambiguous
+      if ffprobe -v quiet "$file" 2>/dev/null; then
+        debug "ffprobe successfully read media file"
+        return 0
+      fi
+      debug "Not a valid media file according to ffprobe"
+      return 1
+      ;;
+  esac
+}
+
+# Function to handle input (either URL or file)
+process_input() {
+  local input="$1"
+  local output_dir="$2"
+  local output_file="${output_dir}/audio.mp3"
+
+  # Check if input is a file that exists
+  if [ -f "$input" ]; then
+    if ! is_valid_media "$input"; then
+      echo "Error: Not a valid media file: $input" >&2
+      return 1
+    fi
+    debug "Input is a valid media file"
+
+    # Extract/convert audio to mp3
+    debug "Converting/extracting audio to mp3 format"
+    if ! ffmpeg -i "$input" -vn -codec:a libmp3lame -qscale:a 2 "$output_file" -y &>/dev/null; then
+      echo "Error: Failed to extract/convert audio" >&2
+      return 1
+    fi
+    echo "Using media file: $input" >&2
+    return 0
+  fi
+
+  # Not a file, treat as URL
+  if ! validate_youtube_url "$input"; then
+    echo "Error: Input must be either a valid media file or YouTube URL" >&2
+    return 1
+  fi
+
+  # Download from YouTube
+  download_audio "$input" "$output_dir"
 }
 
 # Function to check audio duration using ffprobe
@@ -236,10 +348,40 @@ verify_audio() {
 mock_download_audio() {
   local url="$1"
   local output_dir="$2"
+  local youtube_id
+
   debug "Mock download called with URL: $url, output dir: $output_dir"
-  echo "Mock download completed (testing mode)"
+
+  # Get YouTube ID from URL
+  youtube_id=$(echo "$url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
+
+  # Create cache directory if it doesn't exist
+  local cache_dir="/tmp/yt-transcriber"
+  mkdir -p "$cache_dir"
+
+  # Create a mock audio file in the cache (only if it doesn't exist)
+  local cache_file="${cache_dir}/${youtube_id}.mp3"
+  if [ ! -f "$cache_file" ]; then
+    ffmpeg -f lavfi -i "sine=frequency=1000:duration=3" -ar 44100 "$cache_file" 2>/dev/null
+  fi
+
+  # Create mock metadata file
+  cat > "${output_dir}/metadata.json" << EOF
+{
+  "title": "Test Video",
+  "channel": "Test Channel",
+  "upload_date": "20240101",
+  "duration": 3.0,
+  "webpage_url": "$url"
+}
+EOF
+
+  # Copy the mock audio file to the output directory
+  cp "$cache_file" "${output_dir}/audio.mp3"
+
   return 0
 }
+export -f mock_download_audio
 
 # Function to download YouTube audio
 download_audio() {
@@ -250,7 +392,8 @@ download_audio() {
   local output_file="${output_dir}/audio.mp3"
   local metadata_file="${output_dir}/metadata.json"
 
-  # Get YouTube ID and cache path
+  # Sanitize URL first, then get ID and cache path
+  url=$(sanitize_youtube_url "$url")
   youtube_id=$(get_youtube_id "$url")
   cache_path=$(get_cache_path "$youtube_id")
 
@@ -374,16 +517,6 @@ def transcribe(audio_file, output_file, model_name, metadata_file):
     with open(metadata_file) as f:
         metadata = json.load(f)
 
-    # Print metadata header
-    print("=== Video Metadata ===")
-    print(f"Title: {metadata['title']}")
-    print(f"Channel: {metadata['channel']}")
-    print(f"Upload Date: {metadata['upload_date']}")
-    print(f"Duration: {format_duration(metadata['duration'])}")
-    print(f"URL: {metadata['webpage_url']}")
-    print("=== Transcript ===")
-    print()
-
     # Load model and transcribe
     print(f"Loading {model_name} model...", file=sys.stderr)
     model = whisper.load_model(model_name)
@@ -397,7 +530,7 @@ def transcribe(audio_file, output_file, model_name, metadata_file):
 
     transcript = result["text"].strip()
 
-    # Write complete output (metadata + transcript) to file and stdout
+    # Write complete output (metadata + transcript) to stdout
     output = (
         f"=== Video Metadata ===\n"
         f"Title: {metadata['title']}\n"
@@ -431,7 +564,7 @@ EOF
 }
 
 # Main function
-main() {
+yt-transcribe() {
   local model="$DEFAULT_WHISPER_MODEL"
 
   # Parse options
@@ -458,19 +591,14 @@ main() {
     esac
   done
 
-  # Check for YouTube URL
+  # Check for input
   if [ $# -eq 0 ]; then
     debug "No arguments provided, showing usage"
     show_usage >&2
     exit 2
   fi
 
-  # Rest of main function...
-  debug "Using model: $model"
-
-  # Validate URL
-  debug "Validating URL: $1"
-  validate_youtube_url "$1"
+  debug "Whisper model to be used: $model"
 
   # Create working directory safely
   debug "Creating working directory"
@@ -479,7 +607,7 @@ main() {
 
   echo "Working directory: $WORK_DIR" >&2
 
-  # Only set up Python and install packages if we're not in mock mode
+  # Set up Python and transcribe
   if [ "${MOCK_DOWNLOAD:-false}" != "true" ]; then
     debug "Setting up Python environment (not in mock mode)"
     setup_python_env
@@ -488,10 +616,10 @@ main() {
     debug "Skipping Python setup (mock mode)"
   fi
 
-  # Download audio
-  debug "Starting download process"
-  download_audio "$1" "$WORK_DIR" >&2
-  debug "Download process completed"
+  # Process input (URL or file)
+  if ! process_input "$1" "$WORK_DIR"; then
+    exit 1
+  fi
 
   # Transcribe the audio
   debug "Starting transcription process"
@@ -499,7 +627,7 @@ main() {
   debug "Transcription process completed"
 }
 
-# Run main if script is executed directly
+# Run yt-transcribe if script is executed directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
+  yt-transcribe "$@"
 fi

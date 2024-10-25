@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+translate() {
+  # Default to English if no language is provided
+  local target_language="${1:-English}"
+  local prompt="You are an expert translator who always aims for the most accurate translation in order to avoid all possible conflict-causing miscommunication. Please translate the following into ${target_language}. If there is an idiom, word, concept or expression that does not translate perfectly, please make your best attempt while footnoting it IN BOTH LANGUAGES to add extra context/detail. Do not output anything but the translation and the dual-language footnotes (if any). If there is an unresolvable issue with the content (including a lack of it), the specified language or the translation, you can mention that (in both the source and destination languages, assuming the specified one was clear) prefixed with 'Problem: '."
+  local content=$(cat)  # Reading piped content
+  local api_key="${OPENAI_API_KEY}"
+  local model="chatgpt-4o-latest"
+
+  # Building the JSON payload for the OpenAI API
+  local payload=$(jq -n \
+    --arg prompt "$prompt" \
+    --arg content "$content" \
+    --arg model "$model" \
+    '{
+      "model": $model,
+      "messages": [{"role": "system", "content": $prompt}, {"role": "user", "content": $content}]
+    }'
+  )
+
+  # Making the API request
+  curl -s https://api.openai.com/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $api_key" \
+    -d "$payload" \
+    | jq -r '.choices[0].message.content'
+}
+
+# Usage example:
+# echo "Bonjour tout le monde" | translate spanish
+# echo "Guten Morgen" | translate  # defaults to English
+
+# Run translate if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  translate "$@"
+fi

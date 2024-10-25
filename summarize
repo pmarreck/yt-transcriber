@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+summarize() {
+  local prompt="Please summarize the most pertinent elements of the following transcript or narrative. If it (or any part of it) presents a list of things (questions, points, tasks, steps, sequential events, etc.), please list those out without collapsing them further. If there is an issue with the content, you can mention that prefixed with 'Problem: ', otherwise say nothing regarding issues. Don't comment on the summary itself."
+  local content=$(cat)  # Reading piped content
+  local api_key="${OPENAI_API_KEY}"
+  local model="${OPENAI_MODEL:-chatgpt-4o-latest}"
+
+  # Building the JSON payload for the OpenAI API
+  local payload=$(jq -n \
+    --arg prompt "$prompt" \
+    --arg content "$content" \
+    --arg model "$model" \
+    '{
+      "model": $model,
+      "messages": [{"role": "system", "content": $prompt}, {"role": "user", "content": $content}]
+    }'
+  )
+
+  # Making the API request
+  curl -s https://api.openai.com/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $api_key" \
+    -d "$payload" \
+    | jq -r '.choices[0].message.content'
+}
+
+# Usage example:
+# echo "Your content here" | summarize
+# Run summarize if script is executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  summarize
+fi
