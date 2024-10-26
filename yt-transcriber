@@ -131,6 +131,7 @@ ensure_cache_dir() {
     mkdir -p "$cache_dir"
     chmod 755 "$cache_dir"
   fi
+  debug "Cache dir: $cache_dir"
   echo "$cache_dir"
 }
 
@@ -396,6 +397,8 @@ download_audio() {
   url=$(sanitize_youtube_url "$url")
   youtube_id=$(get_youtube_id "$url")
   cache_path=$(get_cache_path "$youtube_id")
+  debug "YouTube ID: $youtube_id"
+  debug "Cache path: $cache_path"
 
   # First get metadata regardless of cache status
   echo "Fetching video metadata..." >&2

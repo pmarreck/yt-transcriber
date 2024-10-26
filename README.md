@@ -42,3 +42,10 @@ If you set the `DEBUG` env var (to anything), you'll get additional logging/debu
 # (when in the project directory)
 ./yt-transcriber -m small "/path/to/video/or/audio/file.mp4" | ./summarize | ./translate Süddeutsch > ~/Documents/bavarian_german_summary.txt
 ```
+
+For a full debug run try this:
+
+```bash
+# (when in the project directory)
+DEBUG=1 ./yt-transcriber -m small "https://www.youtube.com/watch?v=<youtube_id>" | tee last_transcript.txt | ./summarize
+```
