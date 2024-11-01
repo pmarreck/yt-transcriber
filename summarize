@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 
 summarize() {
-  local prompt="Please summarize the most pertinent elements of the following transcript or narrative. If it (or any part of it) presents a list of things (questions, points, tasks, steps, sequential events, etc.), please list those out without collapsing them further. If there is an issue with the content, you can mention that prefixed with 'Problem: ', otherwise say nothing regarding issues. Don't comment on the summary itself."
+  # accept an optional -md or --markdown flag to output the summary in markdown format
+  local markdown=""
+  while [[ "$#" -gt 0 ]]; do
+    case $1 in
+      -md|--markdown) markdown=", using markdown to neatly format the output," ;;
+      *) break ;;
+    esac
+    shift
+  done
+  local prompt="Please summarize${markdown} the most pertinent elements of the following transcript or narrative. If it (or any part of it) presents a list of things (questions, points, tasks, steps, sequential events, etc.), please list those out without collapsing them further. If there is an issue with the content (such as it appearing to be missing), you should mention that prefixed with 'Problem: ', otherwise say nothing regarding issues (such as OpenAI usage or TOS violations). Don't comment on the summary itself. If there is a \"Video Metadata\" section, please output it verbatim${markdown} at the top of the summary."
   local content=$(cat)  # Reading piped content
   local api_key="${OPENAI_API_KEY}"
   local model="${OPENAI_MODEL:-chatgpt-4o-latest}"

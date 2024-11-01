@@ -66,6 +66,15 @@ unset _sourced
 
 set -Eeuo pipefail
 
+# Configuration
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+WORK_DIR=""
+DEFAULT_WHISPER_MODEL="small"
+# Set the directory for the virtual environment
+XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+VENV_DIR="$XDG_CACHE_HOME/$SCRIPT_NAME/.venv"
+
 # Debug function
 debug() {
   if [ -n "${DEBUG:-}" ]; then
@@ -73,15 +82,49 @@ debug() {
   fi
 }
 
-# Configuration
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-WORK_DIR=""
-DEFAULT_WHISPER_MODEL="base"
-# Set the directory for the virtual environment
-XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
-VENV_DIR="$XDG_CACHE_HOME/$SCRIPT_NAME/.venv"
 debug "Script directory: $SCRIPT_DIR"
+
+# graceful dependency checking
+needs() {
+  local bin=$1
+  shift
+  command -v $bin > /dev/null 2>&1 || {
+    printf "$SCRIPT_NAME requires %s but it's not installed or in PATH; %s\n" "$bin" "$*" 1>&2
+    return 1
+  }
+}
+
+# graceful (?) version checking
+version() {
+  local bin="$1"
+  local version="$2"
+  shift 2
+  local instructions="$*" # optional
+  # check that the version is the minimum desired based on a regex
+  # ffmpeg errors but does return the version so we capture the output and return 0
+  local versiondata=$($bin --version 2>&1 | head -n1)
+  if ! echo "$versiondata" | grep -q "$version"; then
+    printf "$SCRIPT_NAME requires %s %s but you have %s; %s\n" "$bin" "$(echo $version | tr -d '\\')" "$versiondata" "$instructions" 1>&2
+    printf '%s\n' "It may work, but expected results are less guaranteed. Allowing for now." 1>&2
+    return 0
+  fi
+}
+
+versionchecks() {
+  version bash 'version 5\.' 'please upgrade bash'
+  version curl 'curl 8\.' 'please upgrade curl (or take your chances if yours is greater)'
+  version python3 'Python 3\.' 'please install Python 3+ (or take your chances if yours is greater)'
+  # version pip 'pip 24\.' 'please upgrade pip with `pip install --upgrade pip`'
+  version ffmpeg 'version 7\.' 'please install this version of ffmpeg (or take your chances if yours is greater)'
+}
+
+dependencychecks() {
+  needs 'bash' 'please install bash'
+  needs 'curl' 'please install curl'
+  needs 'python3' 'please install python 3+'
+  # needs 'pip' 'please install pip 24+'
+  needs 'ffmpeg' 'please install ffmpeg 7+'
+}
 
 # Function to show usage
 show_usage() {
@@ -98,6 +141,8 @@ show_usage() {
   echo "  - Path to an audio file (.mp3, .wav, .ogg, .aac, .flac, etc.)"
   echo "  - Path to a video file (.mp4, .mkv, .webm, .avi, etc.)"
   echo "  Any format supported by ffmpeg should work"
+  dependencychecks || true
+  versionchecks
 }
 
 # Function to get file modification time in a cross-platform way
@@ -725,6 +770,11 @@ yt-transcribe() {
   local model="$DEFAULT_WHISPER_MODEL"
   local skip_transcription=false
 
+  # check dependencies
+  dependencychecks
+  # check versions
+  versionchecks
+
   # Parse options
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1190,6 +1240,8 @@ EOF
 
   # Ensure tests run in correct order
   echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
+  dependencychecks
+  versionchecks
   run_test "Script exists and executable" test_script_exists
   run_test "Usage message" test_usage
   run_test "URL validation" test_url_validation

@@ -23,7 +23,7 @@
         # Set up virtual environment if it doesn't exist
         if [ ! -d .venv ]; then
           echo "Creating new Python virtual environment..."
-          python -m venv .venv
+          python3 -m venv .venv
         fi
 
         # Activate virtual environment
@@ -32,18 +32,18 @@
         # Install Python packages if needed
         if [ ! -f .venv/.packages-installed ]; then
           echo "Installing Python packages..."
-          python -m pip install --upgrade pip
-          python -m pip install torch torchvision torchaudio
-          python -m pip install openai-whisper
-          python -m pip install psutil
+          python3 -m pip install --upgrade pip
+          python3 -m pip install torch torchvision torchaudio
+          python3 -m pip install openai-whisper
+          python3 -m pip install psutil
           # Mark packages as installed
           touch .venv/.packages-installed
         fi
 
         echo -e "\033[33mWhisper environment ready with MPS support!\033[0m"
-        echo "Python: $(python --version)"
+        echo "Python: $(python3 --version)"
         echo "Torch: $(python -c 'import torch; print(f"PyTorch {torch.__version__}")')"
-        echo "MPS available: $(python -c 'import torch; print(torch.backends.mps.is_available())')"
+        echo "MPS available: $(python3 -c 'import torch; print(torch.backends.mps.is_available())')"
 
         # Add .venv/bin to PATH
         export PATH="$PWD/.venv/bin:$PATH"
