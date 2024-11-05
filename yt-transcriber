@@ -38,14 +38,25 @@ if [ "$_sourced" -eq "0" ]; then
     # Note that any commands & syntax here must be POSIX-compliant sh since we haven't
     # swapped out to the expected shell and version yet.
     # List dependencies here:
-    deps="bashInteractive gawkInteractive jq"
+    base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python311 python311Packages.pip python311Packages.virtualenv"
+    # Platform-specific dependencies using POSIX-compliant shell syntax
+    case `uname -s` in
+      Darwin*)
+        # macOS-specific dependencies (likely none needed as they're included in base system)
+        deps="$base_deps"
+        ;;
+      *)
+        # Linux-specific dependencies
+        deps="$base_deps libgcc libstdcxx5"
+        ;;
+    esac
     # ENV vars to allow into the pure environment here:
     # These tend to cause bugs if not included
-    must_include_env_vars="HOME PATH COLORTERM LANG LC_CTYPE LANGUAGE"
+    must_include_env_vars="HOME PATH COLORTERM LANG LC_CTYPE LANGUAGE LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH GCC_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH PKG_CONFIG_PATH NIX_LDFLAGS NIX_CFLAGS_COMPILE"
     # Allow any XDG_* vars
     xdg_vars=`env | awk -F= '$1 ~ /^XDG_[A-Z_]+$/ { print $1 }'`
     # Allow any other specified config vars based on filtering
-    extra_env_vars="DEBUG TEST"
+    extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH"
     # gum_vars=`env | awk -F= '$1 ~ /^GUM_[A-Z_]+$/ { print $1 }'`
     # Allow any config vars for THIS script
     # food_csv_vars="`env | awk -F= '$1 ~ /^FOOD_CSV_[A-Z_]+$/ { print $1 }'` MY_LAT MY_LONG"
@@ -56,7 +67,7 @@ if [ "$_sourced" -eq "0" ]; then
     ### THIS IS THE MAIN MAGIC NIX BIT:
     _nix_wrapper_magic=1 exec nix shell -k _nix_wrapper_magic $allowed_env_vars -i $deps -c bash "$0" "$@"
     # clean up after ourselves
-    unset allowed_env_vars must_include_env_vars xdg_vars extra_env_vars deps nixpkgs
+    unset allowed_env_vars must_include_env_vars xdg_vars extra_env_vars base_deps deps nixpkgs
   fi
   unset _nix_wrapper_magic
 fi
