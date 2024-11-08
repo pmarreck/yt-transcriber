@@ -740,8 +740,7 @@ def transcribe(audio_file, output_file, model_name, metadata_file):
 
     result = model.transcribe(
         audio_file,
-        fp16=False,
-        language='en'
+        fp16=False
     )
 
     end_time = time.time()
