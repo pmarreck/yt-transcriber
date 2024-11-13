@@ -37,8 +37,8 @@ if [ "$_sourced" -eq "0" ]; then
     nixpkgs="github:NixOS/nixpkgs/64b80bfb316b57cdb8919a9110ef63393d74382a"
     # Note that any commands & syntax here must be POSIX-compliant sh since we haven't
     # swapped out to the expected shell and version yet.
-    # List dependencies here:
-    base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python311 python311Packages.pip python311Packages.virtualenv"
+    # List base dependencies here:
+    base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python311 python311Packages.pip python311Packages.torch python311Packages.torchvision python311Packages.torchaudio python311Packages.openai-whisper python311Packages.yt-dlp python311Packages.psutil python311Packages.virtualenv"
     # Platform-specific dependencies using POSIX-compliant shell syntax
     case `uname -s` in
       Darwin*)
@@ -125,16 +125,28 @@ versionchecks() {
   version bash 'version 5\.' 'please upgrade bash'
   version curl 'curl 8\.' 'please upgrade curl (or take your chances if yours is greater)'
   version python3 'Python 3\.' 'please install Python 3+ (or take your chances if yours is greater)'
-  # version pip 'pip 24\.' 'please upgrade pip with `pip install --upgrade pip`'
-  version ffmpeg 'version 7\.' 'please install this version of ffmpeg (or take your chances if yours is greater)'
+  version ffmpeg 'version 7\.' 'please install this version of ffmpeg (or take your chances if yours is different)'
 }
 
 dependencychecks() {
   needs 'bash' 'please install bash'
   needs 'curl' 'please install curl'
   needs 'python3' 'please install python 3+'
-  # needs 'pip' 'please install pip 24+'
   needs 'ffmpeg' 'please install ffmpeg 7+'
+
+  # Verify Python packages are available
+  # if ! python3 -c 'import torch' 2>/dev/null; then
+  #     echo "Error: PyTorch not found. Are you running this through Nix?" >&2
+  #     return 1
+  # fi
+  # if ! python3 -c 'import whisper' 2>/dev/null; then
+  #     echo "Error: Whisper not found. Are you running this through Nix?" >&2
+  #     return 1
+  # fi
+  # if ! python3 -c 'import yt_dlp' 2>/dev/null; then
+  #     echo "Error: yt-dlp not found. Are you running this through Nix?" >&2
+  #     return 1
+  # fi
 }
 
 # Function to show usage
@@ -154,6 +166,15 @@ show_usage() {
   echo "  Any format supported by ffmpeg should work"
   dependencychecks || true
   versionchecks
+}
+
+num_cores() {
+  # Get the number of cores on the system
+  if [ "$(uname)" == "Darwin" ]; then
+    sysctl -n hw.ncpu
+  else
+    nproc
+  fi
 }
 
 # Function to get file modification time in a cross-platform way
@@ -641,14 +662,11 @@ transcribe_audio() {
   local model="${3:-$DEFAULT_WHISPER_MODEL}"
   local transcript_file="${output_dir}/transcript.txt"
   local metadata_file="${output_dir}/metadata.json"
+  export OMP_NUM_THREADS=$(num_cores)
+  export MKL_NUM_THREADS=$OMP_NUM_THREADS
 
   debug "Transcribing audio file: $audio_file with model: $model"
   echo "Generating transcript using ${model} model..." >&2
-
-  if ! python3 -c 'import whisper' 2>/dev/null; then
-    debug "Installing whisper..."
-    python3 -m pip install -q openai-whisper >&2
-  fi
 
   if ! python3 - "$audio_file" "$transcript_file" "$model" "$metadata_file" <<'EOF'
 import sys
