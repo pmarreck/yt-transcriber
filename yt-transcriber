@@ -252,7 +252,6 @@ sanitize_youtube_url() {
     return 1
   fi
 
-  debug "Sanitized URL: $clean_url"
   echo "$clean_url"
 }
 
@@ -315,10 +314,10 @@ setup_python_env() {
     touch "$VENV_DIR/.packages-installed"
   fi
 
-  echo -e "\033[33mWhisper environment ready with MPS support!\033[0m"
-  echo "Python: $(python3 --version)"
-  echo "Torch: $(python3 -c 'import torch; print(f"PyTorch {torch.__version__}")')"
-  echo "MPS available: $(python3 -c 'import torch; print(torch.backends.mps.is_available())')"
+  debug "Whisper environment ready with MPS support!"
+  debug "Python: $(python3 --version)"
+  debug "Torch: $(python3 -c 'import torch; print(f"PyTorch {torch.__version__}")')"
+  debug "MPS available: $(python3 -c 'import torch; print(torch.backends.mps.is_available())')"
 
   # Add .venv/bin to PATH
   export PATH="$VENV_DIR/bin:$PATH"
@@ -568,6 +567,7 @@ download_audio() {
 
   # Sanitize URL first, then get ID and cache path
   url=$(sanitize_youtube_url "$url")
+  debug "Sanitized URL: $url"
   youtube_id=$(get_youtube_id "$url")
   cache_path=$(get_cache_path "$youtube_id")
   debug "YouTube ID: $youtube_id"
