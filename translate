@@ -1,34 +1,204 @@
 #!/usr/bin/env bash
 
+# Source shared functions
+source "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/support_functions.bash"
+
+
+OLLAMA_DEFAULT_MODEL=${OLLAMA_DEFAULT_MODEL:-llama3.3:70b}
+
+show_help() {
+  cat << EOF
+Usage: echo "content" | translate [options] [target_language, default English]
+Examples: echo "Bonjour tout le monde" | translate [-l [ollama|lm_studio][:model]] spanish
+
+Translate content using either OpenAI's API or a local LLM (Ollama or LM Studio).
+
+Options:
+  -h, --help              Show this help message
+  -l, --local [provider]  Use a local LLM provider instead of OpenAI
+                         Format: [ollama|lm_studio][:model_name]
+                         Examples:
+                           -l                 # defaults to ollama:$OLLAMA_DEFAULT_MODEL
+                           -l ollama          # Uses default model ($OLLAMA_DEFAULT_MODEL)
+                           -l ollama:mistral  # Uses specific model
+                           -l lm_studio       # Uses whatever model is loaded in LM Studio
+
+Environment Variables:
+  DEBUG                 Set to any value to enable debug output
+  OPENAI_API_KEY        Required for OpenAI API (default provider)
+  OPENAI_MODEL          Model to use with OpenAI (default: chatgpt-4o-latest)
+  OLLAMA_DEFAULT_MODEL  Default model for Ollama (default: $OLLAMA_DEFAULT_MODEL)
+  LM_STUDIO_DEFAULT_MODEL  Default model for LM Studio
+
+Notes:
+  - Local LLM providers must be running:
+    - Ollama: http://localhost:11434
+    - LM Studio: http://localhost:1234
+  - For Ollama, models must be pulled first: ollama pull <model>
+  - For LM Studio, models must be manually loaded in the UI
+EOF
+}
+
+# Validate if a string is a supported local provider
+is_valid_provider() {
+  local provider="$1"
+  # Extract just the provider name without any model specification
+  local base_provider="${provider%%:*}"
+  case "$base_provider" in
+    ollama|lm_studio)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 translate() {
-  # Default to English if no language is provided
-  local target_language="${1:-English}"
-  local prompt="You are an expert translator who always aims for the most accurate translation in order to avoid all possible conflict-causing miscommunication. Please translate the following into ${target_language}. If there is an idiom, word, concept or expression that does not translate perfectly, please make your best attempt while footnoting it IN BOTH LANGUAGES to add extra context/detail. Do not output anything but the translation and the dual-language footnotes (if any). If there is an unresolvable issue with the content (including a lack of it), the specified language or the translation, you can mention that (in both the source and destination languages, assuming the specified one was clear) prefixed with 'Problem: '. Please preserve all markdown formatting, if it exists."
-  local content=$(cat)  # Reading piped content
-  local api_key="${OPENAI_API_KEY}"
-  local model="chatgpt-4o-latest"
+  local local_llm=""
+  local target_language="English"  # Default
 
-  # Building the JSON payload for the OpenAI API
-  local payload=$(jq -n \
-    --arg prompt "$prompt" \
-    --arg content "$content" \
-    --arg model "$model" \
-    '{
-      "model": $model,
-      "messages": [{"role": "system", "content": $prompt}, {"role": "user", "content": $content}]
-    }'
-  )
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -h|--help)
+        show_help
+        return 0
+        ;;
+      -l|--local)
+        if [[ -n "$2" && ! "$2" =~ ^- ]]; then
+          if is_valid_provider "$2"; then
+            local_llm="$2"
+            shift
+          else
+            # If the next arg isn't a valid provider, assume it's the target language
+            local_llm="ollama"  # Default to ollama
+            target_language="$2"
+            shift
+          fi
+        else
+          local_llm="ollama"  # Default to ollama if no provider specified
+        fi
+        shift
+        ;;
+      *)
+        if [[ ! "$1" =~ ^- ]]; then
+          target_language="$1"
+        else
+          echo "Error: Unknown option $1" >&2
+          show_help
+          return 1
+        fi
+        shift
+        ;;
+    esac
+  done
 
-  # Making the API request
-  curl -s https://api.openai.com/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer $api_key" \
-    -d "$payload" \
-    | jq -r '.choices[0].message.content'
+  local prompt="You are an expert translator who always aims for the most accurate translation in order to avoid all possible conflict-causing miscommunication. Please translate the following into ${target_language^}. For ONLY the idioms, words, concepts or expressions that do not translate perfectly: (1) Make your best translation attempt (2) Add footnotes using ONLY the language names in brackets to mark EXPLANATIONS or CLARIFICATIONS (not the original phrases). Format like this, one localized explanation per line: [English]: <the explanation of the meaning or clarification issue regarding translation of phrase to ${target_language^}, in English> [${target_language^}]: <the explanation of the meaning or clarification issue regarding translation of phrase to ${target_language^}, in ${target_language^}>. Each footnote must contain actual explanations in both languages, not just repetitions of the phrases. Do not output anything but the translation and these dual-language footnotes. If there is an unresolvable issue with the content (including a lack of it), the specified language or the translation, you can mention that (in both the source and destination languages) prefixed with 'Problem: ' translated contextually. Please preserve all markdown formatting, if it exists."
+  local content=$(cat | debug)  # Reading piped content with debug support
+
+  debug "Target language: $target_language"
+  debug "Local LLM: $local_llm"
+
+  if [[ -n "$local_llm" ]]; then
+    # Parse provider and model from local_llm string
+    local provider="${local_llm%%:*}"
+    local model="${local_llm#*:}"
+    [[ "$model" == "$provider" ]] && model=""  # No model specified
+
+    case "$provider" in
+      ollama)
+        model="${model:-${OLLAMA_DEFAULT_MODEL}}"
+        debug "Using Ollama with model: $model"
+
+        # Validate model exists
+        validate_ollama_model "$model" || return 1
+
+        # Call Ollama API
+        local escaped_prompt=$(printf '%s\n\n%s' "$prompt" "$content" | jq -Rs .)
+        local payload="{\"model\":\"$model\",\"prompt\":${escaped_prompt},\"stream\":false}"
+        debug "Payload:"
+        debug "$payload"
+
+        local response=$(curl -s -X POST http://localhost:11434/api/generate \
+          -H "Content-Type: application/json" \
+          -d "$payload")
+
+        debug "Ollama response:"
+        debug "$response"
+        debug "Response after jq:"
+        debug "$(echo "$response" | jq -r '.response')"
+
+        echo "$response" | jq -r '.response'
+        ;;
+
+      lm_studio)
+        model="${model:-${LM_STUDIO_DEFAULT_MODEL}}"
+        debug "Using LM Studio with model: $model"
+
+        # Call LM Studio API
+        local escaped_prompt=$(printf '%s' "$prompt" | jq -Rs .)
+        local escaped_content=$(printf '%s' "$content" | jq -Rs .)
+        local payload="{\"messages\":[{\"role\":\"system\",\"content\":${escaped_prompt}},{\"role\":\"user\",\"content\":${escaped_content}}],\"model\":\"$model\"}"
+        debug "Payload:"
+        debug "$payload"
+
+        local response=$(curl -s -X POST http://localhost:1234/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d "$payload")
+
+        # Validate response
+        validate_lm_studio_response "$response" "$model" || return 1
+
+        debug "LM Studio response:"
+        debug "$response"
+        debug "Response after jq:"
+        debug "$(echo "$response" | jq -r '.choices[0].message.content')"
+
+        echo "$response" | jq -r '.choices[0].message.content'
+        ;;
+
+      *)
+        echo "Error: Unknown local LLM provider: $provider" >&2
+        show_help
+        return 1
+        ;;
+    esac
+  else
+    local api_key="${OPENAI_API_KEY}"
+    local model="${OPENAI_MODEL:-chatgpt-4o-latest}"
+
+    debug "Using OpenAI with model: $model"
+
+    # Building the JSON payload for the OpenAI API
+    local payload=$(jq -n \
+      --arg prompt "$prompt" \
+      --arg content "$content" \
+      --arg model "$model" \
+      '{
+        "model": $model,
+        "messages": [{"role": "system", "content": $prompt}, {"role": "user", "content": $content}]
+      }'
+    )
+
+    debug "API Payload:"
+    debug "$payload"
+
+    # Making the API request
+    local response=$(curl -s https://api.openai.com/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer $api_key" \
+      -d "$payload")
+
+    debug "API Response:"
+    debug "$response"
+
+    echo "$response" | jq -r '.choices[0].message.content'
+  fi
 }
 
 # Usage example:
-# echo "Bonjour tout le monde" | translate spanish
+# echo "Bonjour tout le monde" | translate [-l [ollama|lm_studio][:model]] spanish
 # echo "Guten Morgen" | translate  # defaults to English
 
 # Run translate if script is executed directly
