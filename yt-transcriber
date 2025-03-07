@@ -34,7 +34,7 @@ if [ "$_sourced" -eq "0" ]; then
     fi
     # You DO have Nix, so adjust its pinned packages source, deps and allowed env vars.
     # This is pinned to the latest 24.05 commit as of 2024-10-31
-    nixpkgs="github:NixOS/nixpkgs/64b80bfb316b57cdb8919a9110ef63393d74382a"
+    nixpkgs="github:NixOS/nixpkgs/de0fe301211c267807afd11b12613f5511ff7433"
     # Note that any commands & syntax here must be POSIX-compliant sh since we haven't
     # swapped out to the expected shell and version yet.
     # List base dependencies here:
@@ -306,10 +306,10 @@ setup_python_env() {
   # We do this outside of Nix because unfortunately this is the most supported/reliable way at this time
   if [ ! -f "$VENV_DIR/.packages-installed" ]; then
     echo "Installing Python packages..."
-    python3 -m pip install --upgrade pip
-    python3 -m pip install torch torchvision torchaudio
-    python3 -m pip install openai-whisper
-    python3 -m pip install psutil
+    python3 -m pip install --upgrade pip --disable-pip-version-check
+    python3 -m pip install torch torchvision torchaudio --disable-pip-version-check
+    python3 -m pip install openai-whisper --disable-pip-version-check
+    python3 -m pip install psutil --disable-pip-version-check
     # Mark packages as installed
     touch "$VENV_DIR/.packages-installed"
   fi
@@ -326,7 +326,7 @@ setup_python_env() {
 
 # Function to install required Python packages
 install_python_packages() {
-  python3 -m pip install -q yt-dlp
+  python3 -m pip install -q yt-dlp --disable-pip-version-check
 }
 
 # Function to invoke our Python helper
