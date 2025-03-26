@@ -30,12 +30,14 @@ https://github.com/DeterminateSystems/nix-installer
 If you refuse to use Nix, you can try to install the following dependencies manually, but I make no guarantees:
 
 ```bash
-python310
+python312
 ffmpeg
 glow
+phantomjs  # Optional, but recommended for better YouTube extraction
 ```
 
 (`glow` is optional; if using the `--markdown|-md` argument with `summarize`, this makes things prettier in the terminal if you pipe to it)
+(`phantomjs` is optional but recommended for better YouTube video extraction - it helps avoid "nsig extraction failed" warnings)
 The Python dependencies will be installed via pip into a venv cached in `$XDG_CACHE_HOME/yt-transcriber/.venv`
 and XDG_CACHE_HOME defaults to `~/.cache` if not set.
 The Whisper model will be downloaded to `$XDG_CACHE_HOME/yt-transcriber/.whisper`.

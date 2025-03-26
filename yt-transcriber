@@ -38,7 +38,7 @@ if [ "$_sourced" -eq "0" ]; then
     # Note that any commands & syntax here must be POSIX-compliant sh since we haven't
     # swapped out to the expected shell and version yet.
     # List base dependencies here:
-    base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python312 rye python312Packages.uv yt-dlp"
+    base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python312 rye python312Packages.uv yt-dlp phantomjs"
     # Platform-specific dependencies using POSIX-compliant shell syntax
     case `uname -s` in
       Darwin*)
@@ -133,6 +133,13 @@ dependencychecks() {
   needs 'curl' 'please install curl'
   needs 'python3' 'please install python 3+'
   needs 'ffmpeg' 'please install ffmpeg 7+'
+  
+  # Check for PhantomJS (optional, but helps with YouTube signature extraction)
+  if ! command -v phantomjs > /dev/null 2>&1; then
+    echo "Note: PhantomJS not found. This is optional but recommended for better YouTube video extraction." >&2
+    echo "      You may see 'nsig extraction failed' warnings without it." >&2
+    echo "      Install from https://phantomjs.org/download.html or through your package manager." >&2
+  fi
 
   # Verify Python packages are available
   # if ! python3 -c 'import torch' 2>/dev/null; then
