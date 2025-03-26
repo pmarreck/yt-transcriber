@@ -19,7 +19,6 @@
         ffmpeg
         rye
         uv
-        phantomjs # Added to fix yt-dlp "nsig extraction failed" warnings
       ];
 
       shellHook = ''
