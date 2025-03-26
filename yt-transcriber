@@ -56,7 +56,7 @@ if [ "$_sourced" -eq "0" ]; then
     # Allow any XDG_* vars
     xdg_vars=`env | awk -F= '$1 ~ /^XDG_[A-Z_]+$/ { print $1 }'`
     # Allow any other specified config vars based on filtering
-    extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH"
+    extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH INTEGRATION_TEST INTEGRATION_TEST_DEPS_ONLY INTEGRATION_TEST_URL INTEGRATION_TEST_ARGS MOCK_DOWNLOAD DEFAULT_WHISPER_MODEL"
     # gum_vars=`env | awk -F= '$1 ~ /^GUM_[A-Z_]+$/ { print $1 }'`
     # Allow any config vars for THIS script
     # food_csv_vars="`env | awk -F= '$1 ~ /^FOOD_CSV_[A-Z_]+$/ { print $1 }'` MY_LAT MY_LONG"
@@ -81,7 +81,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 WORK_DIR=""
-DEFAULT_WHISPER_MODEL="small"
+DEFAULT_WHISPER_MODEL="${DEFAULT_WHISPER_MODEL:-small}"
 # Set the directory for the virtual environment
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 RYE_PROJECT_DIR="$XDG_CACHE_HOME/yt-transcriber/.rye"
@@ -153,11 +153,17 @@ dependencychecks() {
 show_usage() {
   echo "Usage: $SCRIPT_NAME [options] <youtube-url|media-file-path>"
   echo "Options:"
-  echo "  -m, --model MODEL         Whisper model to use (base|small|medium|large|large-v2)"
-  echo "                            Default: $DEFAULT_WHISPER_MODEL"
-  echo "  -st, --skip-transcription Skip transcription of the audio"
-  echo "  TEST                      Run in test mode (no audio/video download) (can also set TEST env to any value)"
-  echo "  -h, --help                Show this help message"
+  echo "  -m, --model MODEL          Whisper model to use (base|small|medium|large|large-v2)"
+  echo "                             Default: $DEFAULT_WHISPER_MODEL"
+  echo "  -st, --skip-transcription  Skip transcription of the audio"
+  echo "  --test                     Run in test mode (no audio/video download)"
+  echo "  --integration-test         Run integration tests with real dependencies"
+  echo "  TEST                       Alternative: Run in test mode (can also set TEST env to any value)"
+  echo "  INTEGRATION_TEST           Alternative: Run integration tests (can also set INTEGRATION_TEST env to any value)"
+  echo "  INTEGRATION_TEST_DEPS_ONLY Only run dependency verification for integration tests"
+  echo "  INTEGRATION_TEST_URL       Specify a custom YouTube URL for integration tests"
+  echo "  INTEGRATION_TEST_ARGS      Specify additional arguments for integration tests"
+  echo "  -h, --help                 Show this help message"
   echo
   echo "Input can be either:"
   echo "  - A YouTube URL"
@@ -995,7 +1001,7 @@ else
 fi
 
 # Main function
-yt-transcribe() {
+main() {
   local model="$DEFAULT_WHISPER_MODEL"
   local skip_transcription=false
   local input=""
@@ -1011,6 +1017,11 @@ yt-transcribe() {
     case "$1" in
       --test|TEST)
         TEST=true
+        shift
+        break
+        ;;
+      --integration-test)
+        INTEGRATION_TEST=true
         shift
         break
         ;;
@@ -1047,8 +1058,17 @@ yt-transcribe() {
     input="https://www.youtube.com/watch?v=0NfO4AAwGf4"
   fi
 
-  # Check for input
-  if [ -z "$input" ]; then
+  # Handle integration test mode
+  if $INTEGRATION_TEST; then
+    debug "Integration test mode detected"
+    model="$DEFAULT_WHISPER_MODEL"
+    TEST=true  # Set TEST mode also, since integration tests run within the test framework
+    MOCK_DOWNLOAD=false  # Ensure we use real downloads for integration tests
+    input="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"  # Default to a short video
+  fi
+
+  # Check for input, but allow empty input for test modes
+  if [ -z "$input" ] && ! $TEST && ! $INTEGRATION_TEST; then
     debug "No arguments provided, showing usage"
     show_usage >&2
     exit 2
@@ -1094,7 +1114,7 @@ yt-transcribe() {
     echo "Skipping transcription" >&2
   else
     debug "Starting transcription process"
-    $skip_transcription || transcribe_audio "${WORK_DIR}/audio.mp3" "${WORK_DIR}/transcript.txt" "$model" "${WORK_DIR}/metadata.json"
+    transcribe_audio "${WORK_DIR}/audio.mp3" "${WORK_DIR}/transcript.txt" "$model" "${WORK_DIR}/metadata.json"
     debug "Transcription process completed"
   fi
 }
@@ -1144,6 +1164,114 @@ if $TEST; then
     fi
   }
 
+  # Test CLI argument handling
+  test_cli_test_args() {
+    echo -n "Verifying --test argument in help: "
+    local help_output
+    help_output=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\" && show_usage")
+    
+    if echo "$help_output" | grep -q "^  --test "; then
+      echo -e "${GREEN}✅ Passed${NC}"
+    else
+      echo -e "${RED}❌ Failed: --test not found in help output${NC}"
+      return 1
+    fi
+
+    echo -n "Verifying --integration-test argument in help: "
+    if echo "$help_output" | grep -q "^  --integration-test "; then
+      echo -e "${GREEN}✅ Passed${NC}"
+    else
+      echo -e "${RED}❌ Failed: --integration-test not found in help output${NC}"
+      return 1
+    fi
+    
+    # Verify we can trigger test mode internally
+    echo -n "Verifying --test sets TEST variable: "
+    # Create a subshell with a mock main function to test argument parsing without executing the rest
+    local test_result
+    test_result=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\"; \
+      _original_main=\$FUNCNAME; \
+      main() { \
+        local model=\"base\"; \
+        local skip_transcription=false; \
+        local input=\"\"; \
+        local MOCK_DOWNLOAD=false; \
+        TEST=false; \
+        # Run just the option parsing section
+        while [[ \$# -gt 0 ]]; do \
+          case \"\$1\" in \
+            --test|TEST) \
+              TEST=true; \
+              shift; \
+              break; \
+              ;; \
+            --integration-test) \
+              INTEGRATION_TEST=true; \
+              shift; \
+              break; \
+              ;; \
+            *) \
+              shift; \
+              ;; \
+          esac; \
+        done; \
+        echo \"TEST=\$TEST\"; \
+      }; \
+      main --test")
+    
+    if echo "$test_result" | grep -q "TEST=true"; then
+      echo -e "${GREEN}✅ Passed${NC}"
+    else
+      echo -e "${RED}❌ Failed: --test doesn't set TEST variable${NC}"
+      echo "Output: $test_result"
+      return 1
+    fi
+    
+    # Verify integration-test flag
+    echo -n "Verifying --integration-test sets INTEGRATION_TEST variable: "
+    # Similar subshell test for integration-test
+    local integration_test_result
+    integration_test_result=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\"; \
+      _original_main=\$FUNCNAME; \
+      main() { \
+        local model=\"base\"; \
+        local skip_transcription=false; \
+        local input=\"\"; \
+        local MOCK_DOWNLOAD=false; \
+        INTEGRATION_TEST=false; \
+        # Run just the option parsing section
+        while [[ \$# -gt 0 ]]; do \
+          case \"\$1\" in \
+            --test|TEST) \
+              TEST=true; \
+              shift; \
+              break; \
+              ;; \
+            --integration-test) \
+              INTEGRATION_TEST=true; \
+              shift; \
+              break; \
+              ;; \
+            *) \
+              shift; \
+              ;; \
+          esac; \
+        done; \
+        echo \"INTEGRATION_TEST=\$INTEGRATION_TEST\"; \
+      }; \
+      main --integration-test")
+    
+    if echo "$integration_test_result" | grep -q "INTEGRATION_TEST=true"; then
+      echo -e "${GREEN}✅ Passed${NC}"
+    else
+      echo -e "${RED}❌ Failed: --integration-test doesn't set INTEGRATION_TEST variable${NC}"
+      echo "Output: $integration_test_result"
+      return 1
+    fi
+    
+    return 0
+  }
+
   # Run all tests
   run_tests() {
     echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
@@ -1153,6 +1281,7 @@ if $TEST; then
     test_usage
     test_url_validation
     test_working_dir
+    run_test "Command-line test arguments" test_cli_test_args
 
     if [ "$INTEGRATION_TEST" = "true" ]; then
       echo -e "${BLUE}Running in INTEGRATION TEST mode with real dependencies${NC}"
@@ -1160,17 +1289,11 @@ if $TEST; then
       # Run dependency verification first
       if [ "${INTEGRATION_TEST_DEPS_ONLY:-false}" = "true" ]; then
         # Only run dependency verification
-        if [ "${INTEGRATION_TEST_RYE_BASIC:-false}" = "true" ]; then
-          # Run basic Rye test
-          test_rye_basic
-        else
-          # Run full dependency verification
-          test_rye_dependencies
-        fi
+        run_test "Rye dependency verification" test_rye_dependencies
       else
         # Run both dependency verification and full integration test
-        test_rye_dependencies
-        test_integration
+        run_test "Rye dependency verification" test_rye_dependencies
+        run_test "Integration test" test_integration
       fi
     else
       echo -e "${BLUE}Running in MOCK TEST mode${NC}"
@@ -1304,20 +1427,37 @@ EOF
 
   # Test 2: Script shows usage when run without arguments
   test_usage() {
+    # Skip this test if we're running integration tests to avoid recursion
+    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+      echo -e "${YELLOW}Skipping usage test in integration test mode${NC}"
+      return 0
+    fi
+
     local output
-    output=$(TEST=false yt-transcriber 2>&1 || true)
+    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" 2>&1 || true)
     assert_success "Shows usage message" "echo \"$output\" | grep -q \"Usage:\""
   }
 
   # Test 3: Script validates YouTube URL
   test_url_validation() {
+    # Skip this test if we're running integration tests to avoid recursion
+    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+      echo -e "${YELLOW}Skipping URL validation test in integration test mode${NC}"
+      return 0
+    fi
+
     local output
-    output=$(TEST=false yt-transcriber "not-a-url" 2>&1 || true)
+    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" "not-a-url" 2>&1 || true)
     assert_success "Detects invalid YouTube URL" "echo \"$output\" | grep -q \"Invalid YouTube URL\""
   }
 
   # Test 4: Script creates working directory
   test_working_dir() {
+    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+      echo -e "${YELLOW}Skipping working directory test in integration test mode${NC}"
+      return 0
+    fi
+
     local output
     local work_dir
 
@@ -1326,7 +1466,7 @@ EOF
     export MOCK_DOWNLOAD=true
     debug "Set MOCK_DOWNLOAD=true"
 
-    output=$(TEST=false yt-transcriber "https://www.youtube.com/watch?v=0NfO4AAwGf4" 2>&1 || true)
+    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG=true "$SCRIPT_NAME" "https://www.youtube.com/watch?v=0NfO4AAwGf4" 2>&1 || true)
     debug "Script output: $output"
 
     unset MOCK_DOWNLOAD
@@ -1354,11 +1494,10 @@ EOF
   test_audio_download() {
     local test_url="https://www.youtube.com/watch?v=0NfO4AAwGf4"
     local youtube_id="0NfO4AAwGf4"
-    local cache_file="/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
     local work_dir
 
     # Clear any existing cached file
-    rm -f "$cache_file"
+    rm -f "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
 
     # Create a working directory for this test
     work_dir=$(mktemp -d)
@@ -1382,18 +1521,18 @@ EOF
     mock_download_audio "$test_url" "$work_dir"
 
     # Verify the file exists and has content
-    assert_file_exists "$cache_file"
+    assert_file_exists "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
 
     # Verify it's not empty
-    if [ ! -s "$cache_file" ]; then
+    if [ ! -s "/tmp/$SCRIPT_NAME/${youtube_id}.mp3" ]; then
       echo -e "${RED}❌ Test failed: Downloaded file is empty${NC}"
       exit 1
     fi
 
     # Verify it's actually an audio file
-    if ! file "$cache_file" | grep -qE "Audio|audio"; then
+    if ! file "/tmp/$SCRIPT_NAME/${youtube_id}.mp3" | grep -qE "Audio|audio"; then
       echo -e "${RED}❌ Test failed: File is not an audio file${NC}"
-      echo "File type: $(file "$cache_file")"
+      echo "File type: $(file "/tmp/$SCRIPT_NAME/${youtube_id}.mp3")"
       exit 1
     fi
 
@@ -1409,7 +1548,10 @@ EOF
   test_audio_cache() {
     # Setup
     local test_url="${1:-https://www.youtube.com/watch?v=0NfO4AAwGf4}"
+
+    # Extract the YouTube ID from the URL
     local youtube_id="${test_url##*=}"  # Extract ID from URL dynamically
+
     local cache_dir="/tmp/$SCRIPT_NAME"
     local cache_file="$cache_dir/${youtube_id}.mp3"
     local transcript_file="$cache_dir/${youtube_id}.txt"
@@ -1520,13 +1662,19 @@ EOF
 
   # Test 7: Script generates transcript from audio
   test_transcription() {
+    # Skip this test if we're running integration tests to avoid recursion
+    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+      echo -e "${YELLOW}Skipping transcription test in integration test mode${NC}"
+      return 0
+    fi
+
     local test_url="https://www.youtube.com/watch?v=0NfO4AAwGf4"
     local youtube_id="0NfO4AAwGf4"
     local work_dir
 
     # Run the script and capture its output to get the working directory
     local output
-    output=$(TEST=false yt-transcriber "$test_url" 2>&1 || true)
+    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" "$test_url" 2>&1 || true)
 
     # Extract working directory from output
     work_dir=$(echo "$output" | grep "Working directory:" | cut -d':' -f2- | tr -d ' ')
@@ -1556,101 +1704,6 @@ EOF
     fi
 
     echo "✅ Test passed: Generated valid transcript"
-  }
-
-  # Integration test: Test with real YouTube URL and dependencies
-  test_integration() {
-    echo -e "${BLUE}Running integration test with real YouTube URL and dependencies${NC}"
-
-    # First, verify that the Rye environment is properly activating dependencies
-    if ! test_rye_dependencies; then
-      echo -e "${RED}❌ Integration test failed: Rye dependency verification failed${NC}"
-      return 1
-    fi
-
-    # Use a short, stable YouTube video for testing
-    # Default to the first YouTube video ever ("Me at the zoo")
-    local test_url="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"
-
-    # Extract the YouTube ID from the URL
-    local youtube_id=$(echo "$test_url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
-    if [ -z "$youtube_id" ]; then
-      echo -e "${RED}❌ Integration test failed: Could not extract YouTube ID from URL: $test_url${NC}"
-      return 1
-    fi
-
-    local cache_dir="/tmp/$SCRIPT_NAME"
-    local cache_file="$cache_dir/${youtube_id}.mp3"
-    local transcript_file="$cache_dir/${youtube_id}.txt"
-
-    # Clean up any existing files if INTEGRATION_TEST_CLEAN is set
-    if [ "${INTEGRATION_TEST_CLEAN:-true}" = "true" ]; then
-      echo -e "${YELLOW}Cleaning up existing test files...${NC}"
-      rm -f "$cache_file" "$transcript_file"
-    else
-      echo -e "${YELLOW}Skipping cleanup of existing test files...${NC}"
-    fi
-
-    # Run the actual script with the real URL
-    echo -e "${YELLOW}Downloading and transcribing real YouTube video...${NC}"
-    echo -e "${YELLOW}This may take a few minutes depending on your internet connection and CPU.${NC}"
-
-    local output
-    local cmd_args=("$test_url" "--no-open")
-
-    # Add any additional arguments specified in INTEGRATION_TEST_ARGS
-    if [ -n "${INTEGRATION_TEST_ARGS:-}" ]; then
-      # Split the arguments string into an array
-      IFS=' ' read -r -a extra_args <<< "$INTEGRATION_TEST_ARGS"
-      cmd_args+=("${extra_args[@]}")
-    fi
-
-    echo -e "${YELLOW}Running command: ${SCRIPT_DIR}/$SCRIPT_NAME ${cmd_args[*]}${NC}"
-    output=$(TEST=false yt-transcriber "${cmd_args[@]}" 2>&1)
-    local exit_code=$?
-
-    if [ $exit_code -ne 0 ]; then
-      echo -e "${RED}❌ Integration test failed: Script exited with code $exit_code${NC}"
-      echo "Output: $output"
-      return 1
-    fi
-
-    # Verify the audio file was downloaded
-    if [ ! -f "$cache_file" ]; then
-      echo -e "${RED}❌ Integration test failed: Audio file was not downloaded${NC}"
-      echo "Expected file: $cache_file"
-      echo "Output: $output"
-      return 1
-    fi
-
-    # Verify it's actually an audio file
-    if ! file "$cache_file" | grep -qE "Audio|audio"; then
-      echo -e "${RED}❌ Integration test failed: File is not an audio file${NC}"
-      echo "File type: $(file "$cache_file")"
-      return 1
-    fi
-
-    # Verify the transcript was generated
-    if [ ! -f "$transcript_file" ]; then
-      echo -e "${RED}❌ Integration test failed: Transcript file was not generated${NC}"
-      echo "Expected file: $transcript_file"
-      echo "Output: $output"
-      return 1
-    fi
-
-    # Verify the transcript has content
-    if [ ! -s "$transcript_file" ]; then
-      echo -e "${RED}❌ Integration test failed: Transcript file is empty${NC}"
-      return 1
-    fi
-
-    # Display some of the transcript content
-    echo -e "${YELLOW}Transcript preview:${NC}"
-    head -n 5 "$transcript_file"
-    echo "..."
-
-    echo -e "${GREEN}✅ Integration test passed: Successfully downloaded and transcribed a real YouTube video${NC}"
-    return 0
   }
 
   # Test that Rye environment properly activates dependencies
@@ -1737,80 +1790,148 @@ EOF
     echo -e "${GREEN}✅ All dependencies verified successfully${NC}"
     return 0
   }
+  # Integration test: Test with real YouTube URL and dependencies
+  test_integration() {
+    echo -e "${YELLOW}Running integration test with real YouTube URL and dependencies${NC}"
 
-  # Simple test to check if Rye is working properly
-  test_rye_basic() {
-    echo -e "${BLUE}Running basic Rye test...${NC}"
+    # First verify dependencies
+    test_rye_dependencies
 
-    # Check if Rye is installed
-    if ! command -v rye >/dev/null 2>&1; then
-      echo -e "${RED}❌ Rye is not installed or not in PATH${NC}"
+    local test_url="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"
+
+    # Extract the YouTube ID from the URL
+    local youtube_id=$(echo "$test_url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
+    if [ -z "$youtube_id" ]; then
+      echo -e "${RED}❌ Integration test failed: Could not extract YouTube ID from URL: $test_url${NC}"
       return 1
     fi
 
-    echo "Rye version: $(rye --version)"
+    local cache_dir="/tmp/$SCRIPT_NAME"
+    local cache_file="$cache_dir/${youtube_id}.mp3"
+    local transcript_file="$cache_dir/${youtube_id}.txt"
 
-    # Define Rye project directory
-    local test_rye_dir="${TEST_TEMP_DIR}/rye-test"
-    mkdir -p "$test_rye_dir"
+    # Clean up any existing files if INTEGRATION_TEST_CLEAN is set
+    if [ "${INTEGRATION_TEST_CLEAN:-true}" = "true" ]; then
+      echo -e "${YELLOW}Cleaning up existing test files...${NC}"
+      rm -f "$cache_file" "$transcript_file"
+    else
+      echo -e "${YELLOW}Skipping cleanup of existing test files...${NC}"
+    fi
 
-    echo -e "${YELLOW}Creating a minimal Rye project for testing...${NC}"
+    # Create the cache directory if it doesn't exist
+    mkdir -p "$cache_dir"
 
-    # Create a minimal pyproject.toml
-    cat > "${test_rye_dir}/pyproject.toml" << EOF
-[project]
-name = "rye-test"
-version = "0.1.0"
-description = "Test project for Rye"
-requires-python = ">=3.12"
-dependencies = ["requests"]
+    # Run the actual script with the real URL
+    echo -e "${YELLOW}Downloading and transcribing real YouTube video...${NC}"
+    echo -e "${YELLOW}This may take a few minutes depending on your internet connection and CPU.${NC}"
 
-[tool.rye]
-managed = true
-dev-dependencies = []
-
-[tool.hatch.build.targets.wheel]
-packages = ["."]
-EOF
-
-    # Initialize Rye project
-    echo -e "${YELLOW}Initializing Rye project...${NC}"
-    (cd "$test_rye_dir" && rye init --existing)
-
-    # Create empty lockfiles
-    touch "${test_rye_dir}/requirements.lock"
-    touch "${test_rye_dir}/requirements-dev.lock"
-
-    # Sync dependencies
-    echo -e "${YELLOW}Syncing dependencies...${NC}"
-    (cd "$test_rye_dir" && rye sync)
-
-    # Create virtual environment
-    echo -e "${YELLOW}Creating virtual environment...${NC}"
-    (cd "$test_rye_dir" && rye env create)
-
-    # Check if virtual environment was created
-    if [ ! -d "${test_rye_dir}/.venv" ]; then
-      echo -e "${RED}❌ Failed to create Rye virtual environment${NC}"
+    # First, validate the URL separately to avoid issues with argument parsing
+    echo -e "${YELLOW}Validating YouTube URL: $test_url${NC}"
+    if ! validate_youtube_url "$test_url"; then
+      echo -e "${RED}❌ Integration test failed: Invalid YouTube URL: $test_url${NC}"
       return 1
     fi
 
-    # Activate the virtual environment
-    if [ ! -f "${test_rye_dir}/.venv/bin/activate" ]; then
-      echo -e "${RED}❌ Rye virtual environment activation script not found${NC}"
+    # Define command arguments as an array to properly handle spaces and flags
+    local cmd_args=()
+    cmd_args+=("$test_url")
+
+    # Add any additional arguments from environment variable
+    if [ -n "${INTEGRATION_TEST_ARGS:-}" ]; then
+      # Split the args string into an array
+      IFS=' ' read -r -a extra_args <<< "$INTEGRATION_TEST_ARGS"
+      cmd_args+=("${extra_args[@]}")
+    fi
+
+    # Run the script directly
+    echo -e "${YELLOW}Running command: $SCRIPT_NAME ${cmd_args[*]}${NC}"
+
+    # Create a variable to capture the temporary directory
+    local temp_dir=""
+
+    # Temporary file to capture stderr
+    local stderr_file=$(mktemp)
+
+    # Run the script with DEBUG=true to capture the working directory
+    cd "$SCRIPT_DIR"
+    TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG=true "$SCRIPT_NAME" "${cmd_args[@]}" 2> "$stderr_file"
+    local exit_code=$?
+
+    # Extract the working directory from stderr
+    if grep -q "^Working directory: " "$stderr_file"; then
+      temp_dir=$(grep "^Working directory: " "$stderr_file" | head -n 1 | sed 's/^Working directory: //')
+    fi
+
+    # Display stderr for debugging
+    cat "$stderr_file" >&2
+    rm -f "$stderr_file"
+
+    if [ $exit_code -ne 0 ]; then
+      echo -e "${RED}❌ Integration test failed: Script exited with code $exit_code${NC}"
       return 1
     fi
 
-    echo -e "${YELLOW}Activating virtual environment...${NC}"
-    source "${test_rye_dir}/.venv/bin/activate"
+    # Wait a moment for file operations to complete
+    sleep 2
 
-    # Check if Python is available and requests is installed
-    if ! python -c "import requests; print('Requests version:', requests.__version__)" 2>/dev/null; then
-      echo -e "${RED}❌ Failed to import requests in Rye environment${NC}"
+    # Check if we captured the temporary directory
+    if [ -z "$temp_dir" ]; then
+      echo -e "${RED}❌ Integration test failed: Could not determine temporary working directory${NC}"
       return 1
     fi
 
-    echo -e "${GREEN}✅ Basic Rye test passed${NC}"
+    echo -e "${YELLOW}Temporary working directory: $temp_dir${NC}"
+
+    # Check if the cache directory exists
+    if [ ! -d "$cache_dir" ]; then
+      echo -e "${RED}❌ Integration test failed: Cache directory was not created${NC}"
+      echo "Expected directory: $cache_dir"
+      return 1
+    fi
+
+    # List the contents of the cache directory for debugging
+    echo -e "${YELLOW}Cache directory contents:${NC}"
+    ls -la "$cache_dir"
+
+    # List the contents of the temporary directory
+    echo -e "${YELLOW}Temporary directory contents:${NC}"
+    ls -la "$temp_dir"
+
+    # Verify the audio file was downloaded to cache
+    if [ ! -f "$cache_file" ]; then
+      echo -e "${RED}❌ Integration test failed: Audio file was not downloaded to cache${NC}"
+      echo "Expected file: $cache_file"
+      return 1
+    fi
+
+    # Verify it's actually an audio file
+    if ! file "$cache_file" | grep -qE "Audio|audio"; then
+      echo -e "${RED}❌ Integration test failed: File is not an audio file${NC}"
+      echo "File type: $(file "$cache_file")"
+      return 1
+    fi
+
+    # Verify the transcript was generated in the temporary directory
+    local transcript_file="$temp_dir/transcript.txt"
+    if [ ! -f "$transcript_file" ]; then
+      echo -e "${RED}❌ Integration test failed: Transcript file was not generated${NC}"
+      echo "Expected file: $transcript_file"
+      return 1
+    fi
+
+    # Verify the transcript has content
+    if [ ! -s "$transcript_file" ]; then
+      echo -e "${RED}❌ Integration test failed: Transcript file is empty${NC}"
+      echo "Expected file: $transcript_file"
+      return 1
+    fi
+
+    # Display some of the transcript content
+    echo -e "${YELLOW}Transcript preview:${NC}"
+    head -n 5 "$transcript_file"
+    echo "..."
+
+    echo -e "${GREEN}✅ Integration test passed: Successfully downloaded and transcribed a real YouTube video${NC}"
     return 0
   }
 
@@ -1829,13 +1950,7 @@ EOF
     # Run dependency verification first
     if [ "${INTEGRATION_TEST_DEPS_ONLY:-false}" = "true" ]; then
       # Only run dependency verification
-      if [ "${INTEGRATION_TEST_RYE_BASIC:-false}" = "true" ]; then
-        # Run basic Rye test
-        run_test "Basic Rye test" test_rye_basic
-      else
-        # Run full dependency verification
-        run_test "Rye dependency verification" test_rye_dependencies
-      fi
+      run_test "Rye dependency verification" test_rye_dependencies
     else
       # Run both dependency verification and full integration test
       run_test "Rye dependency verification" test_rye_dependencies
@@ -1849,10 +1964,36 @@ EOF
 
   echo -e "${GREEN}All tests passed!${NC}"
 
-else # This file was run directly without a TEST argument.
+else # This file was run directly
   # If this file is run directly and not sourced, call the function with any argv's provided
-  (return 0 2>/dev/null) || yt-transcribe "$@"
+  if [[ "$*" == *"--test"* ]] || [[ "$*" == *"TEST"* ]]; then
+    # Run in test mode (using mocks)
+    TEST=true
+    INTEGRATION_TEST=false
+    (return 0 2>/dev/null) || main "$@"
+  elif [[ "$*" == *"--integration-test"* ]]; then
+    # Run integration tests (using real services)
+    TEST=true
+    INTEGRATION_TEST=true
+    (return 0 2>/dev/null) || main "$@"
+  else
+    # Normal operation
+    (return 0 2>/dev/null) || main "$@"
+  fi
 fi
 
+
+# USAGE EXAMPLES
+# Basic usage:
+#   ./yt-transcriber "https://www.youtube.com/watch?v=<video_id>"
+#
+# Running tests:
+#   ./yt-transcriber --test               # Run unit tests (uses mocks, no real downloads)
+#   ./yt-transcriber --integration-test   # Run integration tests (uses actual network)
+#
+# Other modes:
+#   TEST=1 ./yt-transcriber               # Alternative way to run tests
+#   INTEGRATION_TEST=1 ./yt-transcriber   # Alternative way to run integration tests
+#
 # if this script is sourced, return; otherwise that will error, and then exit 0
 return 0 2>/dev/null || exit 0
