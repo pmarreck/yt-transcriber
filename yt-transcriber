@@ -56,7 +56,7 @@ if [ "$_sourced" -eq "0" ]; then
     # Allow any XDG_* vars
     xdg_vars=`env | awk -F= '$1 ~ /^XDG_[A-Z_]+$/ { print $1 }'`
     # Allow any other specified config vars based on filtering
-    extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH INTEGRATION_TEST INTEGRATION_TEST_DEPS_ONLY INTEGRATION_TEST_URL INTEGRATION_TEST_ARGS MOCK_DOWNLOAD DEFAULT_WHISPER_MODEL"
+    extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH INTEGRATION_TEST INTEGRATION_TEST_DEPS_ONLY INTEGRATION_TEST_URL INTEGRATION_TEST_ARGS MOCK_DOWNLOAD DEFAULT_WHISPER_MODEL SHOW_YOUTUBE_WARNINGS"
     # gum_vars=`env | awk -F= '$1 ~ /^GUM_[A-Z_]+$/ { print $1 }'`
     # Allow any config vars for THIS script
     # food_csv_vars="`env | awk -F= '$1 ~ /^FOOD_CSV_[A-Z_]+$/ { print $1 }'` MY_LAT MY_LONG"
@@ -90,6 +90,29 @@ RYE_PROJECT_DIR="$XDG_CACHE_HOME/yt-transcriber/.rye"
 debug() {
   if [ -n "${DEBUG:-}" ]; then
     echo -e "\033[1;33mDEBUG: $*\033[0m" >&2
+  fi
+}
+
+# Function to filter out YouTube nsig extraction warnings
+filter_warnings() {
+  if [ "${SHOW_YOUTUBE_WARNINGS:-false}" == "true" ]; then
+    # If showing warnings, just pass through
+    cat
+  else
+    # Default: filter out WARNING lines and their indented continuations
+    awk '
+      /WARNING: \[youtube\].*nsig extraction failed/ { 
+        in_warning = 1; 
+        next; 
+      } 
+      in_warning && /^ +/ { 
+        next; 
+      } 
+      { 
+        in_warning = 0; 
+        print; 
+      }
+    '
   fi
 }
 
@@ -166,6 +189,7 @@ show_usage() {
   echo "  INTEGRATION_TEST_DEPS_ONLY Only run dependency verification for integration tests"
   echo "  INTEGRATION_TEST_URL       Specify a custom YouTube URL for integration tests"
   echo "  INTEGRATION_TEST_ARGS      Specify additional arguments for integration tests"
+  echo "  SHOW_YOUTUBE_WARNINGS      Set to 'true' to show YouTube signature extraction warnings (hidden by default)"
   echo "  -h, --help                 Show this help message"
   echo
   echo "Input can be either:"
@@ -1278,7 +1302,8 @@ if $TEST; then
   # Run all tests
   run_tests() {
     echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
-    echo -e "${YELLOW}Note: 'nsig extraction failed' warnings from yt-dlp are expected and don't affect functionality.${NC}"
+    echo -e "${YELLOW}Note: YouTube signature extraction warnings are filtered by default.${NC}"
+    echo -e "${YELLOW}Tip: Use SHOW_YOUTUBE_WARNINGS=true to see these warnings if needed.${NC}"
 
     # Run basic tests
     test_script_exists
@@ -1974,15 +1999,15 @@ else # This file was run directly
     # Run in test mode (using mocks)
     TEST=true
     INTEGRATION_TEST=false
-    (return 0 2>/dev/null) || main "$@"
+    (return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
   elif [[ "$*" == *"--integration-test"* ]]; then
     # Run integration tests (using real services)
     TEST=true
     INTEGRATION_TEST=true
-    (return 0 2>/dev/null) || main "$@"
+    (return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
   else
-    # Normal operation
-    (return 0 2>/dev/null) || main "$@"
+    # Normal operation (also filter warnings by default)
+    (return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
   fi
 fi
 
