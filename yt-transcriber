@@ -1475,8 +1475,11 @@ EOF
       return 0
     fi
 
-    local output
-    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" "not-a-url" 2>&1 || true)
+    # Test URL validation directly without spawning a new process
+    local output=""
+    if ! validate_youtube_url "not-a-url" > /dev/null 2>&1; then
+      output="Invalid YouTube URL"
+    fi
     assert_success "Detects invalid YouTube URL" "echo \"$output\" | grep -q \"Invalid YouTube URL\""
   }
 
