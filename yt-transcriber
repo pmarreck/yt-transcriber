@@ -420,6 +420,8 @@ show_usage() {
 	echo "  --test                     Run in test mode (no audio/video download)"
 	echo "  --integration-test         Run integration tests with real dependencies"
 	echo "  --no-cache                 Bypass audio/transcript caches for this run"
+	echo "  --clear-video-cache [ID]   Remove cached audio/transcript (all IDs when omitted)"
+	echo "  --cache-status             Show cache counts and total sizes"
 	echo "  TEST                       Alternative: Run in test mode (can also set TEST env to any value)"
 	echo "  INTEGRATION_TEST           Alternative: Run integration tests (can also set INTEGRATION_TEST env to any value)"
 	echo "  INTEGRATION_TEST_DEPS_ONLY Only run dependency verification for integration tests"
@@ -455,6 +457,15 @@ get_file_mtime() {
 	else
 		# Linux version
 		stat -c "%Y" "$file"
+	fi
+}
+
+get_file_size() {
+	local file="$1"
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		stat -f "%z" "$file"
+	else
+		stat -c "%s" "$file"
 	fi
 }
 
@@ -575,6 +586,90 @@ ensure_transcript_cache_dir() {
 	dir=$(transcript_cache_dir "$youtube_id")
 	mkdir -p "$dir"
 	echo "$dir"
+}
+
+clear_video_cache() {
+	local target_id="${1:-}"
+	local transcript_root="$XDG_CACHE_HOME/yt-transcriber"
+	local audio_root="/tmp/$SCRIPT_NAME"
+	local cleared=false
+
+	if [ -n "$target_id" ]; then
+		local transcript_target="$transcript_root/$target_id"
+		local audio_target="$audio_root/${target_id}.mp3"
+
+		if [ -e "$transcript_target" ]; then
+			rm -rf "$transcript_target"
+			cleared=true
+		fi
+
+		if [ -f "$audio_target" ]; then
+			rm -f "$audio_target"
+			cleared=true
+		fi
+	else
+		if [ -d "$transcript_root" ]; then
+			rm -rf "$transcript_root"
+			cleared=true
+		fi
+
+		if [ -d "$audio_root" ] || [ -f "$audio_root" ]; then
+			rm -rf "$audio_root"
+			cleared=true
+		fi
+	fi
+
+	if [ "$cleared" = true ]; then
+		if [ -n "$target_id" ]; then
+			echo "Cleared cached audio/transcript for $target_id."
+		else
+			echo "Cleared all cached audio/transcripts."
+		fi
+	else
+		if [ -n "$target_id" ]; then
+			echo "No cached data found for $target_id." >&2
+		else
+			echo "No cached audio/transcripts found to clear." >&2
+		fi
+	fi
+
+	return 0
+}
+
+calculate_cache_stats() {
+	local dir="$1"
+	shift || true
+	local count=0
+	local total=0
+
+	if [ -d "$dir" ]; then
+		while IFS= read -r -d '' file; do
+			local size
+			size=$(get_file_size "$file" 2>/dev/null || echo 0)
+			total=$((total + size))
+			count=$((count + 1))
+		done < <(find "$dir" -type f "$@" -print0 2>/dev/null)
+	fi
+
+	printf '%s %s\n' "$count" "$total"
+}
+
+cache_status() {
+	local transcript_root="$XDG_CACHE_HOME/yt-transcriber"
+	local audio_root="/tmp/$SCRIPT_NAME"
+	local summarize_root="$XDG_CACHE_HOME/yt-transcriber-summarize"
+	local translate_root="$XDG_CACHE_HOME/yt-transcriber-translate"
+
+	read -r transcript_count transcript_bytes <<<"$(calculate_cache_stats "$transcript_root" -name 'transcript.txt')"
+	read -r audio_count audio_bytes <<<"$(calculate_cache_stats "$audio_root" -name '*.mp3')"
+	read -r summarize_count summarize_bytes <<<"$(calculate_cache_stats "$summarize_root")"
+	read -r translate_count translate_bytes <<<"$(calculate_cache_stats "$translate_root")"
+
+	echo "Cache status:"
+	echo "  Transcripts: ${transcript_count} entries, ${transcript_bytes} bytes"
+	echo "  Audio: ${audio_count} files, ${audio_bytes} bytes"
+	echo "  Summaries: ${summarize_count} entries, ${summarize_bytes} bytes"
+	echo "  Translations: ${translate_count} entries, ${translate_bytes} bytes"
 }
 
 append_python_path() {
@@ -1232,6 +1327,20 @@ main() {
 				NO_CACHE=true
 				shift
 				;;
+			--clear-video-cache)
+				shift
+				local cache_target=""
+				if [[ $# -gt 0 && "$1" != -* ]]; then
+					cache_target="$1"
+					shift
+				fi
+				clear_video_cache "$cache_target"
+				return 0
+				;;
+			--cache-status)
+				cache_status
+				return 0
+				;;
 			--test|TEST)
 				TEST=true
 				shift
@@ -1538,6 +1647,9 @@ if $TEST; then
 		run_test "Python dependency error reasons" test_python_dependency_errors_include_reason
 		run_test "Python package list contains typing-extensions" test_python_package_list_includes_typing_extensions
 		run_test "Transcript cache short-circuit" test_transcript_cache_short_circuit
+		run_test "Clear video cache (all)" test_clear_video_cache_all
+		run_test "Clear video cache (specific)" test_clear_video_cache_specific
+		run_test "Cache status reports totals" test_cache_status_reports_totals
 		run_test "Python path hints" test_python_path_hint
 		run_test "Pinned nixpkgs commit" test_nixpkgs_pin
 		run_test "Command-line test arguments" test_cli_test_args
@@ -1834,6 +1946,143 @@ EOF
 		echo -e "${RED}❌ Failed: cached transcript not used${NC}"
 		echo "$output"
 		return 1
+	}
+
+	test_clear_video_cache_all() {
+		local temp_cache
+		temp_cache=$(mktemp -d)
+		local alias="$TEST_TEMP_DIR/yt-transcriber-clear-all"
+		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
+		local alias_name
+		alias_name=$(basename "$alias")
+		local audio_dir="/tmp/$alias_name"
+		mkdir -p "$audio_dir"
+
+		local youtube_id="allcachetest"
+		local transcript_dir="$temp_cache/yt-transcriber/$youtube_id"
+		mkdir -p "$transcript_dir"
+		echo "cached text" > "$transcript_dir/transcript.txt"
+		echo "audio-bytes" > "$audio_dir/${youtube_id}.mp3"
+
+		if ! _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache >/dev/null 2>&1; then
+			echo -e "${RED}❌ Failed: --clear-video-cache exited with error${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if [ -e "$transcript_dir" ] || [ -f "$audio_dir/${youtube_id}.mp3" ]; then
+			echo -e "${RED}❌ Failed: Cache artifacts still exist after clearing all caches${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		rm -rf "$temp_cache" "$audio_dir"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
+	}
+
+	test_clear_video_cache_specific() {
+		local temp_cache
+		temp_cache=$(mktemp -d)
+		local alias="$TEST_TEMP_DIR/yt-transcriber-clear-specific"
+		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
+		local alias_name
+		alias_name=$(basename "$alias")
+		local audio_dir="/tmp/$alias_name"
+		mkdir -p "$audio_dir"
+
+		local first_id="cache_one"
+		local second_id="cache_two"
+		mkdir -p "$temp_cache/yt-transcriber/$first_id" "$temp_cache/yt-transcriber/$second_id"
+		echo "first" > "$temp_cache/yt-transcriber/$first_id/transcript.txt"
+		echo "second" > "$temp_cache/yt-transcriber/$second_id/transcript.txt"
+		echo "audio" > "$audio_dir/${first_id}.mp3"
+		echo "audio" > "$audio_dir/${second_id}.mp3"
+
+		if ! _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache "$first_id" >/dev/null 2>&1; then
+			echo -e "${RED}❌ Failed: --clear-video-cache <id> exited with error${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if [ -e "$temp_cache/yt-transcriber/$first_id" ] || [ -f "$audio_dir/${first_id}.mp3" ]; then
+			echo -e "${RED}❌ Failed: Specific cache not cleared${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if [ ! -e "$temp_cache/yt-transcriber/$second_id" ] || [ ! -f "$audio_dir/${second_id}.mp3" ]; then
+			echo -e "${RED}❌ Failed: Other caches should remain untouched${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		rm -rf "$temp_cache" "$audio_dir"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
+	}
+
+	test_cache_status_reports_totals() {
+		local temp_cache
+		temp_cache=$(mktemp -d)
+		local alias="$TEST_TEMP_DIR/yt-transcriber-cache-status"
+		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
+		local alias_name
+		alias_name=$(basename "$alias")
+		local audio_dir="/tmp/$alias_name"
+		mkdir -p "$audio_dir"
+
+		mkdir -p "$temp_cache/yt-transcriber/id-one" "$temp_cache/yt-transcriber/id-two"
+		printf 'alpha' > "$temp_cache/yt-transcriber/id-one/transcript.txt"
+		printf 'beta' > "$temp_cache/yt-transcriber/id-two/transcript.txt"
+
+		printf 'audio-one' > "$audio_dir/id-one.mp3"
+		printf 'yo' > "$audio_dir/id-two.mp3"
+
+		mkdir -p "$temp_cache/yt-transcriber-summarize"
+		printf 'sum' > "$temp_cache/yt-transcriber-summarize/id-one.txt"
+
+		mkdir -p "$temp_cache/yt-transcriber-translate"
+		printf 'tr' > "$temp_cache/yt-transcriber-translate/id-one.txt"
+
+		local output
+		if ! output=$(_nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --cache-status 2>/dev/null); then
+			echo -e "${RED}❌ Failed: --cache-status exited with error${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Transcripts: 2 entries, 9 bytes"; then
+			echo -e "${RED}❌ Failed: transcript stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Audio: 2 files, 11 bytes"; then
+			echo -e "${RED}❌ Failed: audio stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Summaries: 1 entries, 3 bytes"; then
+			echo -e "${RED}❌ Failed: summaries stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Translations: 1 entries, 2 bytes"; then
+			echo -e "${RED}❌ Failed: translations stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		rm -rf "$temp_cache" "$audio_dir"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
 	}
 
 
@@ -2488,12 +2737,15 @@ EOF
 		run_test "MPS detection guard" test_mps_guard
 		run_test "Device preference logic" test_device_preference_logic
 		run_test "Python path hints" test_python_path_hint
-		run_test "Python dependency reporting" test_python_dependency_reporting
-		run_test "Python dependency error reasons" test_python_dependency_errors_include_reason
-		run_test "Python package list contains typing-extensions" test_python_package_list_includes_typing_extensions
-		run_test "Pinned nixpkgs commit" test_nixpkgs_pin
-		run_test "GPU flags demand clean pins" test_gpu_flags_require_clean_pin
-	fi
+	run_test "Python dependency reporting" test_python_dependency_reporting
+	run_test "Python dependency error reasons" test_python_dependency_errors_include_reason
+	run_test "Python package list contains typing-extensions" test_python_package_list_includes_typing_extensions
+	run_test "Clear video cache (all)" test_clear_video_cache_all
+	run_test "Clear video cache (specific)" test_clear_video_cache_specific
+	run_test "Cache status reports totals" test_cache_status_reports_totals
+	run_test "Pinned nixpkgs commit" test_nixpkgs_pin
+	run_test "GPU flags demand clean pins" test_gpu_flags_require_clean_pin
+fi
 
 	echo -e "${GREEN}All tests passed!${NC}"
 

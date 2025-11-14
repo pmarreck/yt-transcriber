@@ -1,6 +1,6 @@
 # TODO
 
-1. Add a `--clear-video-cache [<youtube-id>]` option that deletes cached audio/transcripts (all IDs when no argument is provided, or just the specified ID when given).
+1. ✅ (2025-11-14) Add a `--clear-video-cache [<youtube-id>]` option that deletes cached audio/transcripts (all IDs when no argument is provided, or just the specified ID when given).
 
 Future:
 

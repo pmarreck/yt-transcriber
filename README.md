@@ -88,5 +88,7 @@ DEBUG=1 ./yt-transcriber -m small "https://www.youtube.com/watch?v=<youtube_id>"
 - **Transcripts**: each completed run stores the transcript at `$XDG_CACHE_HOME/yt-transcriber/<video-id>/transcript.txt`. Subsequent runs with the same YouTube ID immediately stream that file instead of spinning up Whisper again.
 - **Audio**: extracted audio is cached under `/tmp/yt-transcriber/<video-id>.mp3` so re-downloads are skipped when the cache survives.
 - **Bypassing caches**: pass `--no-cache` (or set `NO_CACHE=1`) to force a fresh download/transcription. This is handy when validating changes or when you suspect the cached data is stale.
+- **Clearing caches**: run `yt-transcriber --clear-video-cache` to wipe every cached transcript/audio pair, or append a YouTube ID (`yt-transcriber --clear-video-cache <video-id>`) to remove just that entry. The command operates on `$XDG_CACHE_HOME/yt-transcriber/<id>` and `/tmp/yt-transcriber/<id>.mp3`.
+- **Inspecting caches**: `yt-transcriber --cache-status` prints the entry counts and total bytes for transcripts, audio, summaries, and translations (the latter two are zero until those caches exist).
 
 You can delete individual caches by removing the corresponding directories/files shown above.
