@@ -41,9 +41,9 @@ If the test is failing for an unclear reason, **improve its clarity**, don’t b
 #### Bash Scripts
 
 1. **Indentation and Formatting**:
-   - Use 2 spaces for indentation, not tabs
+   - Use tabs for indentation
    - Prefer line length under 100 characters
-   - Use blank lines to separate logical sections
+   - Use blank lines and comments to separate and explain logical sections
 
 2. **Variable Naming**:
    - Local variables: lowercase with underscores (`local my_var="value"`)
@@ -67,9 +67,9 @@ If the test is failing for an unclear reason, **improve its clarity**, don’t b
    - Prefer `"$(...)"` over backticks for command substitution
    - Check command exit codes when appropriate
 
-#### Python Code
+#### Python Code (if you must)
 
-1. **Style**: Follow PEP 8 with 4 spaces for indentation
+1. **Style**: Follow PEP 8 with tabs for indentation
 2. **Imports**: Group by standard library, third-party, local
 3. **Error Handling**: Use specific exceptions and meaningful error messages
 4. **Documentation**: Use docstrings for functions and modules
@@ -78,8 +78,7 @@ If the test is failing for an unclear reason, **improve its clarity**, don’t b
 
 1. **Dependency Management**:
    - The project uses Nix for deterministic dependency management
-   - Python dependencies are managed using Rye in the `.rye` directory
-   - The script checks for tool dependencies using `needs()` and `version()`
+   - The script checks for tool dependencies using `needs()`
 
 2. **Debug Output**:
    - Use the `debug()` function for diagnostic messages
