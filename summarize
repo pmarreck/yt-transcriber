@@ -25,7 +25,7 @@ Options:
 Environment Variables:
   DEBUG                 Set to any value to enable debug output
   OPENAI_API_KEY        Required for OpenAI API (default provider)
-  OPENAI_MODEL          Model to use with OpenAI (default: chatgpt-4o-latest)
+  OPENAI_MODEL          Model to use with OpenAI (default: gpt-5-mini)
   OLLAMA_DEFAULT_MODEL  Default model for Ollama (default: $OLLAMA_DEFAULT_MODEL)
   LM_STUDIO_DEFAULT_MODEL  Default model for LM Studio
 
@@ -137,7 +137,7 @@ summarize() {
     esac
   else
     local api_key="${OPENAI_API_KEY}"
-    local model="${OPENAI_MODEL:-chatgpt-4o-latest}"
+    local model="${OPENAI_MODEL:-gpt-5-mini}"
 
     local payload=$(jq -n \
       --arg prompt "$prompt" \
