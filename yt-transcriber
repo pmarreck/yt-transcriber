@@ -1,5 +1,13 @@
 #!/bin/sh
 
+# Re-exec with Bash to support bash-specific features even when Nix wrapper is skipped.
+if [ -z "${BASH_VERSION:-}" ]; then
+	exec bash "$0" "$@"
+fi
+if command -v shopt >/dev/null 2>&1 && shopt -oq posix; then
+	exec bash "$0" "$@"
+fi
+
 ### yt-transcriber
 
 # This script transcribes audio from YouTube videos or local media files using the Hugging Face Whisper model.
@@ -43,6 +51,9 @@ gpu_env_exports() {
 	printf '%s\n' "${exports[@]}"
 }
 (return 0 2>/dev/null) && _sourced=1 || _sourced=0
+if [ "$_sourced" -eq "0" ] && [ -z "${BASH_VERSION:-}" ]; then
+	exec bash "$0" "$@"
+fi
 if [ "$_sourced" -eq "0" ]; then
 	# Only do the following if NOT sourced.
 	# If sourced, we have no control over the parent environment anyway so
@@ -336,16 +347,16 @@ filter_warnings() {
 	else
 		# Default: filter out WARNING lines and their indented continuations
 		awk '
-			/WARNING: \[youtube\].*nsig extraction failed/ { 
-				in_warning = 1; 
-				next; 
-			} 
-			in_warning && /^ +/ { 
-				next; 
-			} 
-			{ 
-				in_warning = 0; 
-				print; 
+			/WARNING: \[youtube\].*nsig extraction failed/ {
+				in_warning = 1;
+				next;
+			}
+			in_warning && /^ +/ {
+				next;
+			}
+			{
+				in_warning = 0;
+				print;
 			}
 		'
 	fi
@@ -391,7 +402,7 @@ dependencychecks() {
 	needs 'curl' 'please install curl'
 	needs 'python3' 'please install python 3+'
 	needs 'ffmpeg' 'please install ffmpeg 7+'
-	
+
 	# The yt-dlp tool will occasionally show 'nsig extraction failed' warnings.
 	# This is normal and doesn't affect functionality.
 
@@ -474,7 +485,7 @@ create_safe_tempdir() {
 	local temp_dir
 
 	# Create temp directory with mktemp
-	temp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t 'yttmp')
+	temp_dir=$(mktemp --tmpdir -d "yttmp.XXXXXX")
 	debug "mktemp created directory: $temp_dir"
 
 	if [ ! -d "$temp_dir" ]; then
@@ -746,252 +757,262 @@ import os
 
 # Try different import approaches for whisper and ensure load_model exists
 try:
-		import whisper as _whisper
-		if not hasattr(_whisper, "load_model"):
-				raise ImportError("whisper module lacks load_model")
-		whisper = _whisper
+    	import whisper as _whisper
+    	if not hasattr(_whisper, "load_model"):
+    			raise ImportError("whisper module lacks load_model")
+    	whisper = _whisper
 except ImportError:
-		try:
-				import openai_whisper as whisper
-		except ImportError:
-				try:
-						import openai.whisper as whisper
-				except ImportError:
-						from openai import whisper
+    	try:
+    			import openai_whisper as whisper
+    	except ImportError:
+    			try:
+    					import openai.whisper as whisper
+    			except ImportError:
+    					from openai import whisper
 
 def get_system_info():
-		return {
-				'cpu_cores': psutil.cpu_count(logical=False),
-				'cpu_threads': psutil.cpu_count(logical=True),
-				'memory_gb': psutil.virtual_memory().total / (1024**3)
-		}
+    	return {
+    			'cpu_cores': psutil.cpu_count(logical=False),
+    			'cpu_threads': psutil.cpu_count(logical=True),
+    			'memory_gb': psutil.virtual_memory().total / (1024**3)
+    	}
 
 def format_duration(seconds):
-		minutes, seconds = divmod(int(seconds), 60)
-		hours, minutes = divmod(minutes, 60)
-		if hours > 0:
-				return f"{hours}:{minutes:02d}:{seconds:02d}"
-		return f"{minutes}:{seconds:02d}"
+    	minutes, seconds = divmod(int(seconds), 60)
+    	hours, minutes = divmod(minutes, 60)
+    	if hours > 0:
+    			return f"{hours}:{minutes:02d}:{seconds:02d}"
+    	return f"{minutes}:{seconds:02d}"
 
 def transcribe(audio_file, output_file, model_name, metadata_file):
-		# Filter out warnings
-		warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
-		warnings.filterwarnings("ignore", category=UserWarning)
+    	# Filter out warnings
+    	warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
+    	warnings.filterwarnings("ignore", category=UserWarning)
 
-		# System info
-		sys_info = get_system_info()
-		print("\n=== System Information ===", file=sys.stderr)
-		print(f"CPU Cores: {sys_info['cpu_cores']}", file=sys.stderr)
-		print(f"CPU Threads: {sys_info['cpu_threads']}", file=sys.stderr)
-		print(f"Memory: {sys_info['memory_gb']:.1f}GB", file=sys.stderr)
-		print(f"PyTorch version: {torch.__version__}", file=sys.stderr)
-		cuda_available = torch.cuda.is_available()
-		print(f"PyTorch CUDA available: {cuda_available}", file=sys.stderr)
-		if cuda_available:
-				try:
-						print(f"CUDA device count: {torch.cuda.device_count()}", file=sys.stderr)
-						print(f"CUDA device name: {torch.cuda.get_device_name(0)}", file=sys.stderr)
-				except Exception as exc:
-						print(f"CUDA device query failed: {exc}", file=sys.stderr)
+    	# System info
+    	sys_info = get_system_info()
+    	print("\n=== System Information ===", file=sys.stderr)
+    	print(f"CPU Cores: {sys_info['cpu_cores']}", file=sys.stderr)
+    	print(f"CPU Threads: {sys_info['cpu_threads']}", file=sys.stderr)
+    	print(f"Memory: {sys_info['memory_gb']:.1f}GB", file=sys.stderr)
+    	print(f"PyTorch version: {torch.__version__}", file=sys.stderr)
+    	cuda_available = torch.cuda.is_available()
+    	print(f"PyTorch CUDA available: {cuda_available}", file=sys.stderr)
+    	if cuda_available:
+    			try:
+    					print(f"CUDA device count: {torch.cuda.device_count()}", file=sys.stderr)
+    					print(f"CUDA device name: {torch.cuda.get_device_name(0)}", file=sys.stderr)
+    			except Exception as exc:
+    					print(f"CUDA device query failed: {exc}", file=sys.stderr)
 
-		mps_backend = getattr(torch.backends, "mps", None)
-		if mps_backend is not None and hasattr(mps_backend, "is_available"):
-				mps_available = bool(mps_backend.is_available())
-		else:
-				mps_available = False
-		if mps_backend is not None and hasattr(mps_backend, "is_built"):
-				mps_built = bool(mps_backend.is_built())
-		else:
-				mps_built = False
+    	mps_backend = getattr(torch.backends, "mps", None)
+    	if mps_backend is not None and hasattr(mps_backend, "is_available"):
+    			mps_available = bool(mps_backend.is_available())
+    	else:
+    			mps_available = False
+    	if mps_backend is not None and hasattr(mps_backend, "is_built"):
+    			mps_built = bool(mps_backend.is_built())
+    	else:
+    			mps_built = False
 
-		print(f"MPS available: {mps_available}", file=sys.stderr)
-		print(f"MPS built: {mps_built}", file=sys.stderr)
+    	print(f"MPS available: {mps_available}", file=sys.stderr)
+    	print(f"MPS built: {mps_built}", file=sys.stderr)
 
-		# Try to load metadata, use empty dict if file doesn't exist
-		try:
-				with open(metadata_file) as f:
-						metadata = json.load(f)
-		except (FileNotFoundError, json.JSONDecodeError) as e:
-				print(f"\nWarning: Could not load metadata file: {str(e)}", file=sys.stderr)
-				print("Continuing without metadata...", file=sys.stderr)
-				metadata = {
-						'title': 'Unknown',
-						'channel': 'Unknown',
-						'upload_date': 'Unknown',
-						'duration': 0,
-						'webpage_url': 'Unknown'
-				}
+    	# Try to load metadata, use empty dict if file doesn't exist
+    	try:
+    			with open(metadata_file) as f:
+    					metadata = json.load(f)
+    	except (FileNotFoundError, json.JSONDecodeError) as e:
+    			print(f"\nWarning: Could not load metadata file: {str(e)}", file=sys.stderr)
+    			print("Continuing without metadata...", file=sys.stderr)
+    			metadata = {
+    					'title': 'Unknown',
+    					'channel': 'Unknown',
+    					'upload_date': 'Unknown',
+    					'duration': 0,
+    					'webpage_url': 'Unknown'
+    			}
 
-		preferred_device = os.environ.get("DEFAULT_DEVICE", "auto").lower()
-		device = torch.device("cpu")
-		humanized_device = "CPU"
+    	preferred_device = os.environ.get("DEFAULT_DEVICE", "auto").lower()
+    	device = torch.device("cpu")
+    	humanized_device = "CPU"
 
-		def pick_cuda() -> bool:
-				return cuda_available
+    	def pick_cuda() -> bool:
+    			return cuda_available
 
-		def pick_mps() -> bool:
-				return mps_available and mps_backend is not None
+    	def pick_mps() -> bool:
+    			return mps_available and mps_backend is not None
 
-		def devices_iter():
-				if preferred_device in {"cuda", "gpu", "nvidia", "rocm", "hip"}:
-						yield "cuda"
-						yield "mps"
-				elif preferred_device in {"mps", "metal"}:
-						yield "mps"
-						yield "cuda"
-				elif preferred_device in {"cpu"}:
-						yield "cpu"
-				else:
-						# auto
-						yield "cuda"
-						yield "mps"
-				yield "cpu"
+    	def devices_iter():
+    			if preferred_device in {"cuda", "gpu", "nvidia", "rocm", "hip"}:
+    					yield "cuda"
+    					yield "mps"
+    			elif preferred_device in {"mps", "metal"}:
+    					yield "mps"
+    					yield "cuda"
+    			elif preferred_device in {"cpu"}:
+    					yield "cpu"
+    			else:
+    					# auto
+    					yield "cuda"
+    					yield "mps"
+    			yield "cpu"
 
-		for candidate in devices_iter():
-				if candidate == "cuda" and pick_cuda():
-						device = torch.device("cuda")
-						humanized_device = "GPU"
-						print("\nUsing CUDA-compatible backend", file=sys.stderr)
-						break
-				if candidate == "mps" and pick_mps():
-						try:
-								print("\nAttempting to use Metal acceleration...", file=sys.stderr)
-								device = torch.device("mps")
-								torch.ones(1).to(device)
-								print("✓ Metal acceleration enabled", file=sys.stderr)
-								humanized_device = "GPU"
-								break
-						except Exception as exc:
-								print(f"\nError setting up Metal: {exc}", file=sys.stderr)
-								continue
-				if candidate == "cpu":
-						device = torch.device("cpu")
-						humanized_device = "CPU"
-						print("\nFalling back to CPU", file=sys.stderr)
-						break
+    	for candidate in devices_iter():
+    			if candidate == "cuda" and pick_cuda():
+    					device = torch.device("cuda")
+    					humanized_device = "GPU"
+    					print("\nUsing CUDA-compatible backend", file=sys.stderr)
+    					break
+    			if candidate == "mps" and pick_mps():
+    					try:
+    							print("\nAttempting to use Metal acceleration...", file=sys.stderr)
+    							device = torch.device("mps")
+    							torch.ones(1).to(device)
+    							print("✓ Metal acceleration enabled", file=sys.stderr)
+    							humanized_device = "GPU"
+    							break
+    					except Exception as exc:
+    							print(f"\nError setting up Metal: {exc}", file=sys.stderr)
+    							continue
+    			if candidate == "cpu":
+    					device = torch.device("cpu")
+    					humanized_device = "CPU"
+    					print("\nFalling back to CPU", file=sys.stderr)
+    					break
 
-		# Print model info to stderr
-		cache_dir = os.path.expanduser("~/.cache/whisper")
-		print(f"Model stored in: {cache_dir}", file=sys.stderr)
-		model_path = os.path.join(cache_dir, f"{model_name}.pt")
-		if os.path.exists(model_path):
-				model_size = os.path.getsize(model_path) / 1024 / 1024
-				print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
-		else:
-				print("Model not cached yet; Whisper will download it on first use.", file=sys.stderr)
+    	# Print model info to stderr
+    	cache_dir = os.path.expanduser("~/.cache/whisper")
+    	print(f"Model stored in: {cache_dir}", file=sys.stderr)
+    	model_path = os.path.join(cache_dir, f"{model_name}.pt")
+    	if os.path.exists(model_path):
+    			model_size = os.path.getsize(model_path) / 1024 / 1024
+    			print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
+    	else:
+    			print("Model not cached yet; Whisper will download it on first use.", file=sys.stderr)
 
-		# Load model and transcribe
-		print(f"Loading {model_name} model into {humanized_device}...", file=sys.stderr)
-		model = whisper.load_model(model_name, device=device.type if hasattr(device, "type") else str(device))
-		print(f"Model loaded, transcribing...", file=sys.stderr)
+    	# Load model and transcribe (with MPS fallback)
+    	print(f"Loading {model_name} model into {humanized_device}...", file=sys.stderr)
+    	try:
+    			model = whisper.load_model(model_name, device=device.type if hasattr(device, "type") else str(device))
+    	except Exception as exc:
+    			if getattr(device, "type", str(device)) == "mps":
+    					print(f"⚠️  MPS load failed ({exc}); retrying on CPU", file=sys.stderr)
+    					device = torch.device("cpu")
+    					humanized_device = "CPU"
+    					model = whisper.load_model(model_name, device="cpu")
+    			else:
+    					raise
 
-		# Time the transcription
-		start_time = time.time()
+    	print(f"Model loaded, transcribing...", file=sys.stderr)
 
-		use_fp16 = getattr(device, "type", str(device)) != "cpu"
-		result = model.transcribe(
-				audio_file,
-				fp16=use_fp16
-		)
+    	# Time the transcription
+    	start_time = time.time()
 
-		end_time = time.time()
-		duration = end_time - start_time
-		print(f"Transcription completed in {duration:.2f} seconds", file=sys.stderr)
+    	use_fp16 = getattr(device, "type", str(device)) != "cpu"
+    	result = model.transcribe(
+    			audio_file,
+    			fp16=use_fp16
+    	)
 
-		transcript = result["text"].strip()
+    	end_time = time.time()
+    	duration = end_time - start_time
+    	print(f"Transcription completed in {duration:.2f} seconds", file=sys.stderr)
 
-		# Write complete output (metadata + transcript) to stdout
-		output = (
-				f"=== Video Metadata ===\n"
-				f"Title: {metadata['title']}\n"
-				f"Channel: {metadata['channel']}\n"
-				f"Upload Date: {metadata['upload_date']}\n"
-				f"Duration: {format_duration(metadata['duration'])}\n"
-				f"URL: {metadata['webpage_url']}\n"
-				f"=== Transcript ===\n\n"
-				f"{transcript}\n"
-		)
+    	transcript = result["text"].strip()
 
-		with open(output_file, 'w') as f:
-				f.write(output)
+    	# Write complete output (metadata + transcript) to stdout
+    	output = (
+    			f"=== Video Metadata ===\n"
+    			f"Title: {metadata['title']}\n"
+    			f"Channel: {metadata['channel']}\n"
+    			f"Upload Date: {metadata['upload_date']}\n"
+    			f"Duration: {format_duration(metadata['duration'])}\n"
+    			f"URL: {metadata['webpage_url']}\n"
+    			f"=== Transcript ===\n\n"
+    			f"{transcript}\n"
+    	)
 
-		print(output)
+    	with open(output_file, 'w') as f:
+    			f.write(output)
+
+    	print(output)
 
 if __name__ == "__main__":
-		transcribe(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+    	transcribe(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
 EOF
-	then
-		echo "Error: Transcription failed" >&2
-		return 1
-	fi
+    then
+    	echo "Error: Transcription failed" >&2
+    	return 1
+    fi
 }
 
 # Function to check if file is valid audio or video
 is_valid_media() {
-	local file="$1"
-	local mime_type
+    local file="$1"
+    local mime_type
 
-	# Check if file exists and is a file
-	if [ ! -f "$file" ]; then
-		return 1
-	fi
+    # Check if file exists and is a file
+    if [ ! -f "$file" ]; then
+    	return 1
+    fi
 
-	# Use file command to check MIME type
-	mime_type=$(file --mime-type -b "$file")
-	debug "MIME type for $file: $mime_type"
+    # Use file command to check MIME type
+    mime_type=$(file --mime-type -b "$file")
+    debug "MIME type for $file: $mime_type"
 
-	case "$mime_type" in
-		audio/*|video/*) return 0 ;;  # Any audio or video MIME type is valid
-		*)
-			# Additional check with ffprobe in case MIME type is ambiguous
-			if ffprobe -v quiet "$file" 2>/dev/null; then
-				debug "ffprobe successfully read media file $file"
-				return 0
-			fi
-			debug "$file is not a valid media file according to ffprobe"
-			return 1
-			;;
-	esac
+    case "$mime_type" in
+    	audio/*|video/*) return 0 ;;  # Any audio or video MIME type is valid
+    	*)
+    		# Additional check with ffprobe in case MIME type is ambiguous
+    		if ffprobe -v quiet "$file" 2>/dev/null; then
+    			debug "ffprobe successfully read media file $file"
+    			return 0
+    		fi
+    		debug "$file is not a valid media file according to ffprobe"
+    		return 1
+    		;;
+    esac
 }
 
 # Function to handle input (either URL or file)
 process_input() {
-	local input="$1"
-	local output_dir="$2"
-	local output_file="${output_dir}/audio.mp3"
+    local input="$1"
+    local output_dir="$2"
+    local output_file="${output_dir}/audio.mp3"
 
-	# Check if input is a file that exists
-	if [ -f "$input" ]; then
-		CURRENT_YOUTUBE_ID=""
-		if ! is_valid_media "$input"; then
-			echo "Error: Not a valid media file: $input" >&2
-			return 1
-		fi
-		debug "Input is a valid media file"
+    # Check if input is a file that exists
+    if [ -f "$input" ]; then
+    	CURRENT_YOUTUBE_ID=""
+    	if ! is_valid_media "$input"; then
+    		echo "Error: Not a valid media file: $input" >&2
+    		return 1
+    	fi
+    	debug "Input is a valid media file"
 
-		# Extract/convert audio to mp3
-		debug "Converting/extracting audio to mp3 format"
-		if ! ffmpeg -i "$input" -vn -codec:a libmp3lame -qscale:a 2 "$output_file" -y &>/dev/null; then
-			echo "Error: Failed to extract/convert audio" >&2
-			return 1
-		fi
-		echo "Using media file: $input" >&2
-		return 0
-	fi
+    	# Extract/convert audio to mp3
+    	debug "Converting/extracting audio to mp3 format"
+    	if ! ffmpeg -i "$input" -vn -codec:a libmp3lame -qscale:a 2 "$output_file" -y &>/dev/null; then
+    		echo "Error: Failed to extract/convert audio" >&2
+    		return 1
+    	fi
+    	echo "Using media file: $input" >&2
+    	return 0
+    fi
 
-	# Not a file, treat as URL
-	if ! validate_youtube_url "$input"; then
-		echo "Error: Input must be either a valid media file or YouTube URL" >&2
-		return 1
-	fi
+    # Not a file, treat as URL
+    if ! validate_youtube_url "$input"; then
+    	echo "Error: Input must be either a valid media file or YouTube URL" >&2
+    	return 1
+    fi
 
-	# Download from YouTube
-	download_audio "$input" "$output_dir"
+    # Download from YouTube
+    download_audio "$input" "$output_dir"
 }
 
 # Function to check audio duration using ffprobe
 get_audio_duration() {
-	local audio_file="$1"
+    local audio_file="$1"
 	ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file"
 }
 
@@ -1529,7 +1550,7 @@ if $TEST; then
 		echo -n "Verifying --test argument in help: "
 		local help_output
 		help_output=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\" && show_usage")
-		
+
 		if echo "$help_output" | grep -q "^  --test "; then
 			echo -e "${GREEN}✅ Passed${NC}"
 		else
@@ -1544,7 +1565,7 @@ if $TEST; then
 			echo -e "${RED}❌ Failed: --integration-test not found in help output${NC}"
 			return 1
 		fi
-		
+
 		# Verify we can trigger test mode internally
 		echo -n "Verifying --test sets TEST variable: "
 		# Create a subshell with a mock main function to test argument parsing without executing the rest
@@ -1578,7 +1599,7 @@ if $TEST; then
 				echo \"TEST=\$TEST\"; \
 			}; \
 			main --test")
-		
+
 		if echo "$test_result" | grep -q "TEST=true"; then
 			echo -e "${GREEN}✅ Passed${NC}"
 		else
@@ -1586,7 +1607,7 @@ if $TEST; then
 			echo "Output: $test_result"
 			return 1
 		fi
-		
+
 		# Verify integration-test flag
 		echo -n "Verifying --integration-test sets INTEGRATION_TEST variable: "
 		# Similar subshell test for integration-test
@@ -1620,7 +1641,7 @@ if $TEST; then
 				echo \"INTEGRATION_TEST=\$INTEGRATION_TEST\"; \
 			}; \
 			main --integration-test")
-		
+
 		if echo "$integration_test_result" | grep -q "INTEGRATION_TEST=true"; then
 			echo -e "${GREEN}✅ Passed${NC}"
 		else
@@ -1628,7 +1649,7 @@ if $TEST; then
 			echo "Output: $integration_test_result"
 			return 1
 		fi
-		
+
 		return 0
 	}
 
@@ -1649,10 +1670,11 @@ if $TEST; then
 		run_test "Transcript cache short-circuit" test_transcript_cache_short_circuit
 		run_test "Clear video cache (all)" test_clear_video_cache_all
 		run_test "Clear video cache (specific)" test_clear_video_cache_specific
-		run_test "Cache status reports totals" test_cache_status_reports_totals
-		run_test "Python path hints" test_python_path_hint
-		run_test "Pinned nixpkgs commit" test_nixpkgs_pin
-		run_test "Command-line test arguments" test_cli_test_args
+			run_test "Cache status reports totals" test_cache_status_reports_totals
+			run_test "Python path hints" test_python_path_hint
+			run_test "Pinned nixpkgs commit" test_nixpkgs_pin
+			run_test "Command-line test arguments" test_cli_test_args
+			run_test "Python helper parses" test_python_helper_parses
 
 		if [ "$INTEGRATION_TEST" = "true" ]; then
 			echo -e "${BLUE}Running in INTEGRATION TEST mode with real dependencies${NC}"
@@ -1681,7 +1703,7 @@ if $TEST; then
 	# Setup
 	# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 	# SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-	TEST_TEMP_DIR=$(mktemp -d)
+	TEST_TEMP_DIR=$(mktemp --tmpdir -d "yttranscriber-tests.XXXXXX")
 	debug "Created test temp dir: $TEST_TEMP_DIR"
 	trap 'debug "Cleaning up test temp dir"; rm -rf ${TEST_TEMP_DIR}' EXIT
 
@@ -1925,6 +1947,26 @@ EOF
 		return 1
 	}
 
+	test_python_helper_parses() {
+		echo -n "Verifying embedded Python helper parses: "
+		local py_block
+		py_block=$(awk '/^if ! python3 - "\$audio_file" "\$transcript_file" "\$model" "\$metadata_file" <<'\''EOF'\''/{flag=1; next} /^EOF$/{if(flag){exit}} flag {print}' "$SCRIPT_DIR/$SCRIPT_NAME")
+		if [ -z "$py_block" ]; then
+			echo -e "${RED}❌ Failed: could not extract Python helper heredoc${NC}"
+			return 1
+		fi
+			if python3 - <<PY 2>/dev/null; then
+import ast
+source = """${py_block}"""
+ast.parse(source)
+PY
+				echo -e "${GREEN}✅ Passed${NC}"
+				return 0
+			fi
+		echo -e "${RED}❌ Failed: Python helper has syntax errors${NC}"
+		return 1
+	}
+
 	test_transcript_cache_short_circuit() {
 		echo -n "Verifying transcript cache short-circuits transcription: "
 		local test_id="testtesttest"
@@ -1950,7 +1992,7 @@ EOF
 
 	test_clear_video_cache_all() {
 		local temp_cache
-		temp_cache=$(mktemp -d)
+	temp_cache=$(mktemp --tmpdir -d "yttranscriber-cache.XXXXXX")
 		local alias="$TEST_TEMP_DIR/yt-transcriber-clear-all"
 		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
 		local alias_name
@@ -1958,17 +2000,19 @@ EOF
 		local audio_dir="/tmp/$alias_name"
 		mkdir -p "$audio_dir"
 
-		local youtube_id="allcachetest"
-		local transcript_dir="$temp_cache/yt-transcriber/$youtube_id"
-		mkdir -p "$transcript_dir"
-		echo "cached text" > "$transcript_dir/transcript.txt"
-		echo "audio-bytes" > "$audio_dir/${youtube_id}.mp3"
+	local youtube_id="allcachetest"
+	local transcript_dir="$temp_cache/yt-transcriber/$youtube_id"
+	mkdir -p "$transcript_dir"
+	echo "cached text" > "$transcript_dir/transcript.txt"
+	echo "audio-bytes" > "$audio_dir/${youtube_id}.mp3"
 
-		if ! _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache >/dev/null 2>&1; then
-			echo -e "${RED}❌ Failed: --clear-video-cache exited with error${NC}"
-			rm -rf "$temp_cache" "$audio_dir"
-			return 1
-		fi
+	local cmd_output=""
+	if ! cmd_output=$(TEST= INTEGRATION_TEST= _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache 2>&1); then
+		echo -e "${RED}❌ Failed: --clear-video-cache exited with error${NC}"
+		[ -n "$cmd_output" ] && echo "$cmd_output"
+		rm -rf "$temp_cache" "$audio_dir"
+		return 1
+	fi
 
 		if [ -e "$transcript_dir" ] || [ -f "$audio_dir/${youtube_id}.mp3" ]; then
 			echo -e "${RED}❌ Failed: Cache artifacts still exist after clearing all caches${NC}"
@@ -1983,7 +2027,7 @@ EOF
 
 	test_clear_video_cache_specific() {
 		local temp_cache
-		temp_cache=$(mktemp -d)
+	temp_cache=$(mktemp --tmpdir -d "yttranscriber-cache.XXXXXX")
 		local alias="$TEST_TEMP_DIR/yt-transcriber-clear-specific"
 		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
 		local alias_name
@@ -1993,17 +2037,19 @@ EOF
 
 		local first_id="cache_one"
 		local second_id="cache_two"
-		mkdir -p "$temp_cache/yt-transcriber/$first_id" "$temp_cache/yt-transcriber/$second_id"
-		echo "first" > "$temp_cache/yt-transcriber/$first_id/transcript.txt"
-		echo "second" > "$temp_cache/yt-transcriber/$second_id/transcript.txt"
-		echo "audio" > "$audio_dir/${first_id}.mp3"
-		echo "audio" > "$audio_dir/${second_id}.mp3"
+	mkdir -p "$temp_cache/yt-transcriber/$first_id" "$temp_cache/yt-transcriber/$second_id"
+	echo "first" > "$temp_cache/yt-transcriber/$first_id/transcript.txt"
+	echo "second" > "$temp_cache/yt-transcriber/$second_id/transcript.txt"
+	echo "audio" > "$audio_dir/${first_id}.mp3"
+	echo "audio" > "$audio_dir/${second_id}.mp3"
 
-		if ! _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache "$first_id" >/dev/null 2>&1; then
-			echo -e "${RED}❌ Failed: --clear-video-cache <id> exited with error${NC}"
-			rm -rf "$temp_cache" "$audio_dir"
-			return 1
-		fi
+	local cmd_output=""
+	if ! cmd_output=$(TEST= INTEGRATION_TEST= _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache "$first_id" 2>&1); then
+		echo -e "${RED}❌ Failed: --clear-video-cache <id> exited with error${NC}"
+		[ -n "$cmd_output" ] && echo "$cmd_output"
+		rm -rf "$temp_cache" "$audio_dir"
+		return 1
+	fi
 
 		if [ -e "$temp_cache/yt-transcriber/$first_id" ] || [ -f "$audio_dir/${first_id}.mp3" ]; then
 			echo -e "${RED}❌ Failed: Specific cache not cleared${NC}"
@@ -2024,7 +2070,7 @@ EOF
 
 	test_cache_status_reports_totals() {
 		local temp_cache
-		temp_cache=$(mktemp -d)
+	temp_cache=$(mktemp --tmpdir -d "yttranscriber-cache.XXXXXX")
 		local alias="$TEST_TEMP_DIR/yt-transcriber-cache-status"
 		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
 		local alias_name
@@ -2042,15 +2088,16 @@ EOF
 		mkdir -p "$temp_cache/yt-transcriber-summarize"
 		printf 'sum' > "$temp_cache/yt-transcriber-summarize/id-one.txt"
 
-		mkdir -p "$temp_cache/yt-transcriber-translate"
-		printf 'tr' > "$temp_cache/yt-transcriber-translate/id-one.txt"
+	mkdir -p "$temp_cache/yt-transcriber-translate"
+	printf 'tr' > "$temp_cache/yt-transcriber-translate/id-one.txt"
 
-		local output
-		if ! output=$(_nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --cache-status 2>/dev/null); then
-			echo -e "${RED}❌ Failed: --cache-status exited with error${NC}"
-			rm -rf "$temp_cache" "$audio_dir"
-			return 1
-		fi
+	local output
+	if ! output=$(TEST= INTEGRATION_TEST= _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --cache-status 2>&1); then
+		echo -e "${RED}❌ Failed: --cache-status exited with error${NC}"
+		[ -n "$output" ] && echo "$output"
+		rm -rf "$temp_cache" "$audio_dir"
+		return 1
+	fi
 
 		if ! echo "$output" | grep -q "Transcripts: 2 entries, 9 bytes"; then
 			echo -e "${RED}❌ Failed: transcript stats missing${NC}"
@@ -2089,7 +2136,7 @@ EOF
 	test_python_path_hint() {
 		echo -n "Verifying setup can consume precomputed PYTHONPATH hints: "
 		local tmp_site
-		tmp_site=$(mktemp -d)
+	tmp_site=$(mktemp --tmpdir -d "yttranscriber-site.XXXXXX")
 		mkdir -p "$tmp_site/torch" "$tmp_site/whisper" "$tmp_site/yt_dlp"
 		printf '%s\n' '"""mock torch package for testing"""' > "$tmp_site/torch/__init__.py"
 		printf '%s\n' '"""mock whisper package for testing"""' > "$tmp_site/whisper/__init__.py"
@@ -2272,7 +2319,7 @@ PY
 		rm -f "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
 
 		# Create a working directory for this test
-		work_dir=$(mktemp -d)
+	work_dir=$(mktemp --tmpdir -d "yttranscriber-work.XXXXXX")
 		debug "Created working directory for audio test: $work_dir"
 
 		# Set mock download mode
@@ -2349,7 +2396,7 @@ EOF
 		export MOCK_DOWNLOAD=true
 
 		# Create a working directory for the test
-		local work_dir=$(mktemp -d)
+	local work_dir=$(mktemp --tmpdir -d "yttranscriber-work.XXXXXX")
 		debug "Created working directory for cache test: $work_dir"
 
 		# Run mock download directly to create the cache file
@@ -2384,7 +2431,7 @@ EOF
 		debug "Running mock download again - should use cache..."
 
 		# Create a new working directory for the second run
-		local work_dir2=$(mktemp -d)
+	local work_dir2=$(mktemp --tmpdir -d "yttranscriber-work.XXXXXX")
 		debug "Created second working directory for cache test: $work_dir2"
 
 		# Run mock download again
@@ -2624,7 +2671,7 @@ EOF
 		local temp_dir=""
 
 		# Temporary file to capture stderr
-		local stderr_file=$(mktemp)
+	local stderr_file=$(mktemp --tmpdir "yttranscriber-stderr.XXXXXX")
 
 		# Run the script with DEBUG=true to capture the working directory
 		cd "$SCRIPT_DIR"
@@ -2755,15 +2802,15 @@ else # This file was run directly
 		# Run in test mode (using mocks)
 		TEST=true
 		INTEGRATION_TEST=false
-		(return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
+		(return 0 2>/dev/null) || { main "$@" 2>&1 1>&3 | filter_warnings 1>&2; } 3>&1
 	elif [[ "$*" == *"--integration-test"* ]]; then
 		# Run integration tests (using real services)
 		TEST=true
 		INTEGRATION_TEST=true
-		(return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
+		(return 0 2>/dev/null) || { main "$@" 2>&1 1>&3 | filter_warnings 1>&2; } 3>&1
 	else
 		# Normal operation (also filter warnings by default)
-		(return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
+		(return 0 2>/dev/null) || { main "$@" 2>&1 1>&3 | filter_warnings 1>&2; } 3>&1
 	fi
 fi
 
