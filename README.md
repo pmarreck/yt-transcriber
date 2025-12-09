@@ -1,6 +1,6 @@
 # yt-transcriber
 
-TUI app- Give it a YouTube URL (or a path to a video or audio file) and you get a transcription with possible speaker identification (WIP) and optional summary or translation, all thanks to open-source AI tooling and my lack of enough free time to watch content-sparse YouTube videos
+CLI app — Give it a YouTube URL (or a path to a video or audio file) and you get a transcription with optional summary or translation and in-progress speaker identification, all thanks to open-source AI tooling and my lack of enough free time to watch content-sparse YouTube videos
 
 ## features
 
@@ -22,7 +22,7 @@ NEW: If you have Nix installed or are running on NixOS, just symlink `yt-transcr
 and `translate` to any directory (usually `~/bin` or `XDG_BIN_HOME` which is usually `~/.local/bin`)
 in your `PATH` and you're good to go (the last two require OPENAI_API_KEY to be
 defined in your environment). The shell script will automatically procure all dependencies
-deterministically and locally and cache them.
+deterministically and locally and cache them. It pins nixpkgs to `github:NixOS/nixpkgs/1b7e751db23cedcd3bf56dc5170840b8a7e752a2` and will re-exec under `nix shell` automatically (no need to run `nix develop` yourself). You can opt into GPU builds with `ENABLE_ROCM=true` or `ENABLE_CUDA=true`.
 
 If you do not have Nix installed, I recommend using the Determinate Nix Installer from here:
 https://github.com/DeterminateSystems/nix-installer
@@ -45,11 +45,7 @@ When you run `yt-transcriber` under Nix, all Python packages (torch, whisper, yt
 
 Use `--no-cache` (or `NO_CACHE=1`) if you ever need to bypass both transcript and audio caches for a run.
 
-the `flake.nix` file manages all deps, so just `nix develop` when in there.
-`./test_flake.sh` tests whether everything's set up correctly.
-`./yt_transcriber TEST` tests the app itself.
-No app keys needed, Whisper runs locally.
-Setup was only tested on Mac with a Nix install thus far. Will add tests for it working without Nix next.
+`./yt-transcriber --test` runs the mock/unit suite; `./yt-transcriber --integration-test` exercises real downloads. No API keys are required for plain transcription; summarization/translation still need `OPENAI_API_KEY`. Tested primarily on macOS with Nix; non-Nix should work if you install the listed deps manually.
 
 ## example usage
 
