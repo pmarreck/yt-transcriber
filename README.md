@@ -36,9 +36,14 @@ glow
 ```
 
 (`glow` is optional; if using the `--markdown|-md` argument with `summarize`, this makes things prettier in the terminal if you pipe to it)
-The Python dependencies will be installed via pip into a venv cached in `$XDG_CACHE_HOME/yt-transcriber/.venv`
-and XDG_CACHE_HOME defaults to `~/.cache` if not set.
-The Whisper model will be downloaded to `$XDG_CACHE_HOME/yt-transcriber/.whisper`.
+
+When you run `yt-transcriber` under Nix, all Python packages (torch, whisper, yt-dlp, etc.) come directly from the pinned `nixpkgs` revision, so there is no `pip`/venv step to babysit. Artifacts land under `XDG_CACHE_HOME` (defaulting to `~/.cache`):
+
+- `~/.cache/yt-transcriber/<video-id>/transcript.txt` – cached transcripts keyed by YouTube ID
+- `~/.cache/whisper` – Whisper model weights
+- `/tmp/yt-transcriber/<video-id>.mp3` – cached audio downloads (cleared on reboot)
+
+Use `--no-cache` (or `NO_CACHE=1`) if you ever need to bypass both transcript and audio caches for a run.
 
 the `flake.nix` file manages all deps, so just `nix develop` when in there.
 `./test_flake.sh` tests whether everything's set up correctly.
@@ -77,3 +82,13 @@ For a full debug run try this:
 # (when in the project directory)
 DEBUG=1 ./yt-transcriber -m small "https://www.youtube.com/watch?v=<youtube_id>" | tee last_transcript.txt | ./summarize
 ```
+
+## caching behavior
+
+- **Transcripts**: each completed run stores the transcript at `$XDG_CACHE_HOME/yt-transcriber/<video-id>/transcript.txt`. Subsequent runs with the same YouTube ID immediately stream that file instead of spinning up Whisper again.
+- **Audio**: extracted audio is cached under `/tmp/yt-transcriber/<video-id>.mp3` so re-downloads are skipped when the cache survives.
+- **Bypassing caches**: pass `--no-cache` (or set `NO_CACHE=1`) to force a fresh download/transcription. This is handy when validating changes or when you suspect the cached data is stale.
+- **Clearing caches**: run `yt-transcriber --clear-video-cache` to wipe every cached transcript/audio pair, or append a YouTube ID (`yt-transcriber --clear-video-cache <video-id>`) to remove just that entry. The command operates on `$XDG_CACHE_HOME/yt-transcriber/<id>` and `/tmp/yt-transcriber/<id>.mp3`.
+- **Inspecting caches**: `yt-transcriber --cache-status` prints the entry counts and total bytes for transcripts, audio, summaries, and translations (the latter two are zero until those caches exist).
+
+You can delete individual caches by removing the corresponding directories/files shown above.

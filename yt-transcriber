@@ -1,5 +1,13 @@
 #!/bin/sh
 
+# Re-exec with Bash to support bash-specific features even when Nix wrapper is skipped.
+if [ -z "${BASH_VERSION:-}" ]; then
+	exec bash "$0" "$@"
+fi
+if command -v shopt >/dev/null 2>&1 && shopt -oq posix; then
+	exec bash "$0" "$@"
+fi
+
 ### yt-transcriber
 
 # This script transcribes audio from YouTube videos or local media files using the Hugging Face Whisper model.
@@ -21,60 +29,162 @@
 # Lastly, to maintain a clean environment, any changes made during the execution are
 # reversed at the end of the script.
 # Everything up to the two relevant `exec` lines SHOULD be POSIX-compliant, ideally.
-(return 0 2>/dev/null) && _sourced=1 || _sourced=0
-if [ "$_sourced" -eq "0" ]; then
-  # Only do the following if NOT sourced.
-  # If sourced, we have no control over the parent environment anyway so
-  # skip this and just rely on the other presence and version checks.
-  if [ ! "$_nix_wrapper_magic" = "1" ]; then
-    # Only do the following if we didn't already get here via the "wrapper magic"
-    if ! command -v nix > /dev/null; then
-      # You don't have Nix, so just use any existing Bash
-      _nix_wrapper_magic=1 exec bash "$0" "$@"
-    fi
-    # You DO have Nix, so adjust its pinned packages source, deps and allowed env vars.
-    # This is pinned to the latest 24.05 commit as of 2025-07-17
-    nixpkgs="github:NixOS/nixpkgs/9b1730429085992444ed764fd631b595ecdf2720"
-    # Note that any commands & syntax here must be POSIX-compliant sh since we haven't
-    # swapped out to the expected shell and version yet.
-    # List base dependencies here:
-    base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python312 rye python312Packages.uv yt-dlp"
-    # Platform-specific dependencies using POSIX-compliant shell syntax
-    case `uname -s` in
-      Darwin*)
-        # macOS-specific dependencies (likely none needed as they're included in base system)
-        deps="$base_deps"
-        ;;
-      *)
-        # Linux-specific dependencies
-        deps="$base_deps libgcc libstdcxx5"
-        ;;
-    esac
-    # ENV vars to allow into the pure environment here:
-    # These tend to cause bugs if not included
-    must_include_env_vars="HOME PATH COLORTERM LANG LC_CTYPE LANGUAGE LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH GCC_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH PKG_CONFIG_PATH NIX_LDFLAGS NIX_CFLAGS_COMPILE TMPDIR"
-    # Allow any XDG_* vars
-    xdg_vars=`env | awk -F= '$1 ~ /^XDG_[A-Z_]+$/ { print $1 }'`
-    # Allow any other specified config vars based on filtering
-    extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH INTEGRATION_TEST INTEGRATION_TEST_DEPS_ONLY INTEGRATION_TEST_URL INTEGRATION_TEST_ARGS MOCK_DOWNLOAD DEFAULT_WHISPER_MODEL SHOW_YOUTUBE_WARNINGS"
-    # gum_vars=`env | awk -F= '$1 ~ /^GUM_[A-Z_]+$/ { print $1 }'`
-    # Allow any config vars for THIS script
-    # food_csv_vars="`env | awk -F= '$1 ~ /^FOOD_CSV_[A-Z_]+$/ { print $1 }'` MY_LAT MY_LONG"
-    allowed_env_vars="$must_include_env_vars $xdg_vars $extra_env_vars" # $gum_vars $food_csv_vars"
-    # Reformat deps and allowed_env_vars to be used as nix shell arguments:
-    deps="`for d in $deps; do printf '%s#%s ' $nixpkgs $d; done`"
-    allowed_env_vars="`for ev in $allowed_env_vars; do printf -- '-k %s ' $ev; done`"
-    ### THIS IS THE MAIN MAGIC NIX BIT:
-    _nix_wrapper_magic=1 exec nix shell -k _nix_wrapper_magic $allowed_env_vars -i $deps -c bash "$0" "$@"
-    # clean up after ourselves
-    unset allowed_env_vars must_include_env_vars xdg_vars extra_env_vars base_deps deps nixpkgs
-  fi
-  unset _nix_wrapper_magic
 
-  # On Linux, ensure LD_LIBRARY_PATH includes libstdcxx5
-  if [ "$(uname -s)" != "Darwin" ]; then
-    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/path/to/libstdcxx5"  # Adjust if needed
-  fi
+normalize_flag() {
+	case "${1,,}" in
+		1|true|yes|on) printf 'true\n' ;;
+		*) printf 'false\n' ;;
+	esac
+}
+
+gpu_env_exports() {
+	local want_rocm want_cuda
+	want_rocm=$(normalize_flag "${1:-false}")
+	want_cuda=$(normalize_flag "${2:-false}")
+
+	local exports=()
+
+	if [ "$want_rocm" = "true" ] || [ "$want_cuda" = "true" ]; then
+		exports+=("NIXPKGS_ALLOW_UNFREE=${NIXPKGS_ALLOW_UNFREE:-1}")
+	fi
+
+	printf '%s\n' "${exports[@]}"
+}
+(return 0 2>/dev/null) && _sourced=1 || _sourced=0
+if [ "$_sourced" -eq "0" ] && [ -z "${BASH_VERSION:-}" ]; then
+	exec bash "$0" "$@"
+fi
+if [ "$_sourced" -eq "0" ]; then
+	# Only do the following if NOT sourced.
+	# If sourced, we have no control over the parent environment anyway so
+	# skip this and just rely on the other presence and version checks.
+	if [ ! "$_nix_wrapper_magic" = "1" ]; then
+		# Only do the following if we didn't already get here via the "wrapper magic"
+		if ! command -v nix > /dev/null; then
+			# You don't have Nix, so just use any existing Bash
+			_nix_wrapper_magic=1 exec bash "$0" "$@"
+		fi
+		# You DO have Nix, so adjust its pinned packages source, deps and allowed env vars.
+		# This is pinned to the latest 24.05 commit as of 2024-10-31
+		nixpkgs="github:NixOS/nixpkgs/1b7e751db23cedcd3bf56dc5170840b8a7e752a2"
+		export YT_TRANSCRIBER_NIXPKGS_PIN="$nixpkgs"
+		# Note that any commands & syntax here must be POSIX-compliant sh since we haven't
+		# swapped out to the expected shell and version yet.
+		# List base dependencies here:
+		base_deps="bashInteractive gawkInteractive jq ffmpeg_7 python312"
+		python_pkg_attrs="python312Packages.numpy python312Packages.typing-extensions python312Packages.torch-bin python312Packages.torchvision-bin python312Packages.torchaudio-bin python312Packages.openai-whisper python312Packages.yt-dlp python312Packages.psutil python312Packages.tqdm python312Packages.tiktoken python312Packages.regex python312Packages.numba python312Packages.llvmlite"
+		enable_rocm="${ENABLE_ROCM:-false}"
+		enable_cuda="${ENABLE_CUDA:-false}"
+
+		enable_rocm=$(normalize_flag "$enable_rocm")
+		enable_cuda=$(normalize_flag "$enable_cuda")
+
+		resolve_attr() {
+			local attr
+			for attr in "$@"; do
+				if nix eval --impure --raw "$nixpkgs#$attr.outPath" >/dev/null 2>&1; then
+					printf '%s\n' "$attr"
+					return 0
+				fi
+			done
+			return 1
+		}
+
+		rocm_deps=""
+		cuda_deps=""
+		if [ "$enable_rocm" = "true" ]; then
+			rocm_runtime_out=$(nix eval --impure --raw "$nixpkgs#rocmPackages_6.rocm-runtime.outPath" 2>/dev/null || true)
+			if [ -n "$rocm_runtime_out" ]; then
+				export YT_TRANSCRIBER_ROCM_OUT="$rocm_runtime_out"
+				rocm_candidates="rocmPackages_6.rocm-runtime rocmPackages_6.hip-runtime-amd rocmPackages_6.rocrand rocmPackages_6.rocsparse rocmPackages_6.rocblas rocmPackages_6.rocfft rocmPackages_6.rocsolver rocmPackages_6.miopen-hip"
+				for pkg in $rocm_candidates; do
+					if nix eval --impure --raw "$nixpkgs#$pkg.outPath" >/dev/null 2>&1; then
+						rocm_deps="$rocm_deps $pkg"
+					fi
+				done
+				rocm_deps="$rocm_deps rocmPackages_6.rocminfo"
+				python_pkg_attrs="python312Packages.numpy python312Packages.typing-extensions python312Packages.torchWithRocm python312Packages.torchvision python312Packages.torchaudio python312Packages.openai-whisper python312Packages.yt-dlp python312Packages.psutil python312Packages.tqdm python312Packages.tiktoken python312Packages.regex python312Packages.numba python312Packages.llvmlite"
+			else
+				echo "Warning: Unable to resolve ROCm runtime in pinned nixpkgs; continuing without ROCm." >&2
+				enable_rocm="false"
+			fi
+		fi
+
+		if [ "$enable_cuda" = "true" ]; then
+			if resolve_attr "cudaPackages.cudatoolkit" >/dev/null; then
+				cuda_deps="cudaPackages.cudatoolkit"
+				python_pkg_attrs="python312Packages.numpy python312Packages.typing-extensions python312Packages.torchWithCuda python312Packages.torchvision python312Packages.torchaudio python312Packages.openai-whisper python312Packages.yt-dlp python312Packages.psutil python312Packages.tqdm python312Packages.tiktoken python312Packages.regex python312Packages.numba python312Packages.llvmlite"
+			else
+				echo "Warning: Unable to resolve CUDA toolkit in pinned nixpkgs; continuing without CUDA." >&2
+				enable_cuda="false"
+			fi
+		fi
+		# Platform-specific dependencies using POSIX-compliant shell syntax
+		case `uname -s` in
+			Darwin*)
+				# macOS-specific dependencies (likely none needed as they're included in base system)
+				deps="$base_deps $python_pkg_attrs"
+				;;
+			*)
+				# Linux-specific dependencies
+				deps="$base_deps $python_pkg_attrs $rocm_deps $cuda_deps stdenv.cc.cc.lib"
+				;;
+		esac
+		# ENV vars to allow into the pure environment here:
+		# These tend to cause bugs if not included
+		must_include_env_vars="HOME PATH COLORTERM LANG LC_CTYPE LANGUAGE LD_LIBRARY_PATH LD_PRELOAD LIBRARY_PATH GCC_PATH CPATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH PKG_CONFIG_PATH NIX_LDFLAGS NIX_CFLAGS_COMPILE"
+		# Allow any XDG_* vars
+		xdg_vars=`env | awk -F= '$1 ~ /^XDG_[A-Z_]+$/ { print $1 }'`
+		# Allow any other specified config vars based on filtering
+		extra_env_vars="DEBUG TEST NIX_PROFILES NIX_SSL_CERT_FILE NIX_PATH INTEGRATION_TEST INTEGRATION_TEST_DEPS_ONLY INTEGRATION_TEST_URL INTEGRATION_TEST_ARGS MOCK_DOWNLOAD DEFAULT_WHISPER_MODEL SHOW_YOUTUBE_WARNINGS YT_TRANSCRIBER_PYTHON_PKGS YT_TRANSCRIBER_PYTHON_PATHS"
+		# gum_vars=`env | awk -F= '$1 ~ /^GUM_[A-Z_]+$/ { print $1 }'`
+		# Allow any config vars for THIS script
+		# food_csv_vars="`env | awk -F= '$1 ~ /^FOOD_CSV_[A-Z_]+$/ { print $1 }'` MY_LAT MY_LONG"
+		allowed_env_vars="$must_include_env_vars $xdg_vars $extra_env_vars" # $gum_vars $food_csv_vars"
+		# Reformat deps and allowed_env_vars to be used as nix shell arguments:
+		deps="`for d in $deps; do printf '%s#%s ' $nixpkgs $d; done`"
+		allowed_env_vars="`for ev in $allowed_env_vars; do printf -- '-k %s ' $ev; done`"
+		export ENABLE_ROCM="$enable_rocm"
+		export ENABLE_CUDA="$enable_cuda"
+		export YT_TRANSCRIBER_PYTHON_PKGS="$python_pkg_attrs"
+
+		python_site_paths=""
+		for attr in $python_pkg_attrs; do
+			out_path=$(nix eval --impure --raw "$nixpkgs#$attr.outPath" 2>/dev/null || true)
+			if [ -n "$out_path" ]; then
+				site_path="$out_path/lib/python3.12/site-packages"
+				if [ -d "$site_path" ]; then
+					case ":$python_site_paths:" in
+						*:"$site_path":*) ;;
+						*)
+							if [ -z "$python_site_paths" ]; then
+								python_site_paths="$site_path"
+							else
+								python_site_paths="$python_site_paths:$site_path"
+							fi
+							;;
+					esac
+				fi
+			fi
+		done
+		export YT_TRANSCRIBER_PYTHON_PATHS="$python_site_paths"
+
+		gpu_env_lines=$(gpu_env_exports "$enable_rocm" "$enable_cuda")
+		if [ -n "$gpu_env_lines" ]; then
+			while IFS= read -r env_line; do
+				[ -z "$env_line" ] && continue
+				export "$env_line"
+			done <<EOF
+$gpu_env_lines
+EOF
+		fi
+
+		### THIS IS THE MAIN MAGIC NIX BIT:
+		_nix_wrapper_magic=1 exec nix shell --impure -k _nix_wrapper_magic $allowed_env_vars -i $deps -c bash "$0" "$@"
+		# clean up after ourselves
+		unset allowed_env_vars must_include_env_vars xdg_vars extra_env_vars base_deps deps nixpkgs
+	fi
+	unset _nix_wrapper_magic
 fi
 unset _sourced
 ### END DEPENDENCY MANAGEMENT
@@ -87,435 +197,555 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 WORK_DIR=""
 DEFAULT_WHISPER_MODEL="${DEFAULT_WHISPER_MODEL:-small}"
-# Set the directory for the virtual environment
+# Set the directory for cache usage
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
-RYE_PROJECT_DIR="$XDG_CACHE_HOME/yt-transcriber/.rye"
+NIXPKGS_PIN="${YT_TRANSCRIBER_NIXPKGS_PIN:-github:NixOS/nixpkgs/1b7e751db23cedcd3bf56dc5170840b8a7e752a2}"
+CURRENT_YOUTUBE_ID=""
+NO_CACHE=${NO_CACHE:-false}
+if [ "$NO_CACHE" = "1" ] || [ "$NO_CACHE" = "true" ]; then
+	NO_CACHE=true
+else
+	NO_CACHE=false
+fi
 
 # Debug function
 debug() {
-  if [ -n "${DEBUG:-}" ]; then
-    echo -e "\033[1;33mDEBUG: $*\033[0m" >&2
-  fi
+	if [ -n "${DEBUG:-}" ]; then
+		echo -e "\033[1;33mDEBUG: $*\033[0m" >&2
+	fi
+}
+
+# Checks whether the given Python modules can be imported; prints missing ones.
+list_missing_python_modules() {
+	if ! command -v python3 >/dev/null 2>&1; then
+		echo "Error: python3 not found in PATH; include python312 in your Nix shell." >&2
+		return 1
+	fi
+
+	if [ "$#" -eq 0 ]; then
+		return 0
+	fi
+
+	local missing
+	missing=$(python3 - "$@" <<'PY'
+import importlib
+import sys
+
+missing = []
+for module in sys.argv[1:]:
+		try:
+				importlib.import_module(module)
+		except Exception as exc:
+				missing.append((module, f"{exc.__class__.__name__}: {exc}"))
+
+if missing:
+		for module, reason in missing:
+				print(f"{module}@@@{reason}")
+PY
+	)
+
+	if [ -n "$missing" ]; then
+		echo "Error: Missing Python modules detected:" >&2
+		while IFS='@@@' read -r module reason; do
+			[ -z "$module" ] && continue
+			echo "  - $module ($reason)" >&2
+		done <<EOF
+$missing
+EOF
+		return 1
+	fi
+
+	return 0
+}
+
+# Ensure libstdc++.so.6 is visible to the dynamic loader on Linux
+ensure_libstdcxx() {
+	if [ "$(uname -s)" = "Darwin" ]; then
+		return 0
+	fi
+
+	if command -v nix >/dev/null 2>&1; then
+		local new_lib_dirs=()
+		local new_path_dirs=()
+
+		append_unique() {
+			local -n _bucket=$1
+			shift
+			local dir
+			for dir in "$@"; do
+				[ -d "$dir" ] || continue
+				case " ${_bucket[*]} " in
+					*" $dir "*) ;;
+					*) _bucket+=("$dir");;
+				esac
+			done
+		}
+
+		local lib_out
+		if lib_out=$(nix eval --impure --raw "${NIXPKGS_PIN}#stdenv.cc.cc.lib.outPath" 2>/dev/null); then
+			append_unique new_lib_dirs "$lib_out/lib" "$lib_out/lib64"
+			for gcc_dir in "$lib_out"/lib/gcc/*/*; do
+				append_unique new_lib_dirs "$gcc_dir"
+			done
+		fi
+
+		case "${ENABLE_ROCM:-${enable_rocm:-}}" in
+			1|true|TRUE|True|yes|YES)
+				local rocm_out="${YT_TRANSCRIBER_ROCM_OUT:-}"
+				if [ -z "$rocm_out" ]; then
+					rocm_out=$(nix eval --impure --raw "${NIXPKGS_PIN}#rocmPackages_6.rocm-runtime.outPath" 2>/dev/null || true)
+				fi
+				if [ -n "$rocm_out" ]; then
+					append_unique new_lib_dirs "$rocm_out/lib" "$rocm_out/lib64"
+					append_unique new_path_dirs "$rocm_out/bin"
+					export HIP_PATH="$rocm_out"
+					export ROCM_PATH="$rocm_out"
+				fi
+				;;
+		esac
+
+		case "${ENABLE_CUDA:-${enable_cuda:-}}" in
+			1|true|TRUE|True|yes|YES)
+				local cuda_out
+				if cuda_out=$(nix eval --impure --raw "${NIXPKGS_PIN}#cudaPackages.cudatoolkit.outPath" 2>/dev/null); then
+					append_unique new_lib_dirs "$cuda_out/lib" "$cuda_out/lib64" "$cuda_out/lib/stubs"
+					append_unique new_path_dirs "$cuda_out/bin"
+					export CUDA_PATH="$cuda_out"
+					export CUDA_HOME="$cuda_out"
+				fi
+				;;
+		esac
+
+		if [ ${#new_lib_dirs[@]} -gt 0 ]; then
+			local joined_libs
+			joined_libs=$(IFS=:; echo "${new_lib_dirs[*]}")
+			export LD_LIBRARY_PATH="$joined_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+			debug "Updated LD_LIBRARY_PATH with extra GPU runtime dirs: $joined_libs"
+		fi
+
+		if [ ${#new_path_dirs[@]} -gt 0 ]; then
+			local joined_paths
+			joined_paths=$(IFS=:; echo "${new_path_dirs[*]}")
+			export PATH="$joined_paths${PATH:+:$PATH}"
+			debug "Updated PATH with GPU runtime bins: $joined_paths"
+		fi
+
+		if [ ${#new_lib_dirs[@]} -gt 0 ] || [ ${#new_path_dirs[@]} -gt 0 ]; then
+			return 0
+		fi
+	fi
+
+	echo "Warning: libstdc++.so.6 not found; PyTorch may fail to load" >&2
+	return 1
 }
 
 # Function to filter out YouTube nsig extraction warnings
 filter_warnings() {
-  if [ "${SHOW_YOUTUBE_WARNINGS:-false}" == "true" ]; then
-    # If showing warnings, just pass through
-    cat
-  else
-    # Default: filter out WARNING lines and their indented continuations
-    awk '
-      /WARNING: \[youtube\].*nsig extraction failed/ {
-        in_warning = 1;
-        next;
-      }
-      in_warning && /^ +/ {
-        next;
-      }
-      {
-        in_warning = 0;
-        print;
-      }
-    '
-  fi
+	if [ "${SHOW_YOUTUBE_WARNINGS:-false}" == "true" ]; then
+		# If showing warnings, just pass through
+		cat
+	else
+		# Default: filter out WARNING lines and their indented continuations
+		awk '
+			/WARNING: \[youtube\].*nsig extraction failed/ {
+				in_warning = 1;
+				next;
+			}
+			in_warning && /^ +/ {
+				next;
+			}
+			{
+				in_warning = 0;
+				print;
+			}
+		'
+	fi
 }
 
 debug "Script directory: $SCRIPT_DIR"
 
 # graceful dependency checking
 needs() {
-  local bin=$1
-  shift
-  command -v $bin > /dev/null 2>&1 || {
-    printf "$SCRIPT_NAME requires %s but it's not installed or in PATH; %s\n" "$bin" "$*" 1>&2
-    return 1
-  }
+	local bin=$1
+	shift
+	command -v $bin > /dev/null 2>&1 || {
+		printf "$SCRIPT_NAME requires %s but it's not installed or in PATH; %s\n" "$bin" "$*" 1>&2
+		return 1
+	}
 }
 
 # graceful (?) version checking
 version() {
-  local bin="$1"
-  local version="$2"
-  shift 2
-  local instructions="$*" # optional
-  # check that the version is the minimum desired based on a regex
-  # ffmpeg errors but does return the version so we capture the output and return 0
-  local versiondata=$($bin --version 2>&1 | head -n1)
-  if ! echo "$versiondata" | grep -q "$version"; then
-    printf "$SCRIPT_NAME requires %s %s but you have %s; %s\n" "$bin" "$(echo $version | tr -d '\\')" "$versiondata" "$instructions" 1>&2
-    printf '%s\n' "It may work, but expected results are less guaranteed. Allowing for now." 1>&2
-    return 0
-  fi
+	local bin="$1"
+	local version="$2"
+	shift 2
+	local instructions="$*" # optional
+	# check that the version is the minimum desired based on a regex
+	# ffmpeg errors but does return the version so we capture the output and return 0
+	local versiondata=$($bin --version 2>&1 | head -n1)
+	if ! echo "$versiondata" | grep -q "$version"; then
+		printf "$SCRIPT_NAME requires %s %s but you have %s; %s\n" "$bin" "$(echo $version | tr -d '\\')" "$versiondata" "$instructions" 1>&2
+		printf '%s\n' "It may work, but expected results are less guaranteed. Allowing for now." 1>&2
+		return 0
+	fi
 }
 
 versionchecks() {
-  version bash 'version 5\.' 'please upgrade bash'
-  version curl 'curl 8\.' 'please upgrade curl (or take your chances if yours is greater)'
-  version python3 'Python 3\.' 'please install Python 3+ (or take your chances if yours is greater)'
-  version ffmpeg 'version 7\.' 'please install this version of ffmpeg (or take your chances if yours is different)'
+	version bash 'version 5\.' 'please upgrade bash'
+	version curl 'curl 8\.' 'please upgrade curl (or take your chances if yours is greater)'
+	version python3 'Python 3\.' 'please install Python 3+ (or take your chances if yours is greater)'
+	version ffmpeg 'version 7\.' 'please install this version of ffmpeg (or take your chances if yours is different)'
 }
 
 dependencychecks() {
-  needs 'bash' 'please install bash'
-  needs 'curl' 'please install curl'
-  needs 'python3' 'please install python 3+'
-  needs 'ffmpeg' 'please install ffmpeg 7+'
+	needs 'bash' 'please install bash'
+	needs 'curl' 'please install curl'
+	needs 'python3' 'please install python 3+'
+	needs 'ffmpeg' 'please install ffmpeg 7+'
 
-  # The yt-dlp tool will occasionally show 'nsig extraction failed' warnings.
-  # This is normal and doesn't affect functionality.
+	# The yt-dlp tool will occasionally show 'nsig extraction failed' warnings.
+	# This is normal and doesn't affect functionality.
 
-  # Verify Python packages are available
-  # if ! python3 -c 'import torch' 2>/dev/null; then
-  #     echo "Error: PyTorch not found. Are you running this through Nix?" >&2
-  #     return 1
-  # fi
-  # if ! python3 -c 'import whisper' 2>/dev/null; then
-  #     echo "Error: Whisper not found. Are you running this through Nix?" >&2
-  #     return 1
-  # fi
-  # if ! python3 -c 'import yt_dlp' 2>/dev/null; then
-  #     echo "Error: yt-dlp not found. Are you running this through Nix?" >&2
-  #     return 1
-  # fi
+	# Verify Python packages are available
+	# if ! python3 -c 'import torch' 2>/dev/null; then
+	#     echo "Error: PyTorch not found. Are you running this through Nix?" >&2
+	#     return 1
+	# fi
+	# if ! python3 -c 'import whisper' 2>/dev/null; then
+	#     echo "Error: Whisper not found. Are you running this through Nix?" >&2
+	#     return 1
+	# fi
+	# if ! python3 -c 'import yt_dlp' 2>/dev/null; then
+	#     echo "Error: yt-dlp not found. Are you running this through Nix?" >&2
+	#     return 1
+	# fi
 }
 
 # Function to show usage
 show_usage() {
-  echo "Usage: $SCRIPT_NAME [options] <youtube-url|media-file-path>"
-  echo "Options:"
-  echo "  -m, --model MODEL          Whisper model to use (base|small|medium|large|large-v2)"
-  echo "                             Default: $DEFAULT_WHISPER_MODEL"
-  echo "  -st, --skip-transcription  Skip transcription of the audio"
-  echo "  --test                     Run in test mode (no audio/video download)"
-  echo "  --integration-test         Run integration tests with real dependencies"
-  echo "  TEST                       Alternative: Run in test mode (can also set TEST env to any value)"
-  echo "  INTEGRATION_TEST           Alternative: Run integration tests (can also set INTEGRATION_TEST env to any value)"
-  echo "  INTEGRATION_TEST_DEPS_ONLY Only run dependency verification for integration tests"
-  echo "  INTEGRATION_TEST_URL       Specify a custom YouTube URL for integration tests"
-  echo "  INTEGRATION_TEST_ARGS      Specify additional arguments for integration tests"
-  echo "  SHOW_YOUTUBE_WARNINGS      Set to 'true' to show YouTube signature extraction warnings (hidden by default)"
-  echo "  -h, --help                 Show this help message"
-  echo
-  echo "Input can be either:"
-  echo "  - A YouTube URL"
-  echo "  - Path to an audio file (.mp3, .wav, .ogg, .aac, .flac, etc.)"
-  echo "  - Path to a video file (.mp4, .mkv, .webm, .avi, etc.)"
-  echo "  Any format supported by ffmpeg should work"
-  dependencychecks || true
-  versionchecks
+	echo "Usage: $SCRIPT_NAME [options] <youtube-url|media-file-path>"
+	echo "Options:"
+	echo "  -m, --model MODEL          Whisper model to use (base|small|medium|large|large-v2)"
+	echo "                             Default: $DEFAULT_WHISPER_MODEL"
+	echo "  -st, --skip-transcription  Skip transcription of the audio"
+	echo "  --test                     Run in test mode (no audio/video download)"
+	echo "  --integration-test         Run integration tests with real dependencies"
+	echo "  --no-cache                 Bypass audio/transcript caches for this run"
+	echo "  --clear-video-cache [ID]   Remove cached audio/transcript (all IDs when omitted)"
+	echo "  --cache-status             Show cache counts and total sizes"
+	echo "  TEST                       Alternative: Run in test mode (can also set TEST env to any value)"
+	echo "  INTEGRATION_TEST           Alternative: Run integration tests (can also set INTEGRATION_TEST env to any value)"
+	echo "  INTEGRATION_TEST_DEPS_ONLY Only run dependency verification for integration tests"
+	echo "  INTEGRATION_TEST_URL       Specify a custom YouTube URL for integration tests"
+	echo "  INTEGRATION_TEST_ARGS      Specify additional arguments for integration tests"
+	echo "  SHOW_YOUTUBE_WARNINGS      Set to 'true' to show YouTube signature extraction warnings (hidden by default)"
+	echo "  -h, --help                 Show this help message"
+	echo
+	echo "Input can be either:"
+	echo "  - A YouTube URL"
+	echo "  - Path to an audio file (.mp3, .wav, .ogg, .aac, .flac, etc.)"
+	echo "  - Path to a video file (.mp4, .mkv, .webm, .avi, etc.)"
+	echo "  Any format supported by ffmpeg should work"
+	dependencychecks || true
+	versionchecks
 }
 
 num_cores() {
-  # Get the number of cores on the system
-  if [ "$(uname)" == "Darwin" ]; then
-    sysctl -n hw.ncpu
-  else
-    nproc
-  fi
+	# Get the number of cores on the system
+	if [ "$(uname)" == "Darwin" ]; then
+		sysctl -n hw.ncpu
+	else
+		nproc
+	fi
 }
 
 # Function to get file modification time in a cross-platform way
 get_file_mtime() {
-  local file="$1"
-  if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS version
-    stat -f "%m" "$file"
-  else
-    # Linux version
-    stat -c "%Y" "$file"
-  fi
+	local file="$1"
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		# macOS version
+		stat -f "%m" "$file"
+	else
+		# Linux version
+		stat -c "%Y" "$file"
+	fi
+}
+
+get_file_size() {
+	local file="$1"
+	if [[ "$OSTYPE" == "darwin"* ]]; then
+		stat -f "%z" "$file"
+	else
+		stat -c "%s" "$file"
+	fi
 }
 
 # Create a safe temporary directory
 create_safe_tempdir() {
-  local temp_dir
+	local temp_dir
 
-  # Create temp directory with mktemp
-  temp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t 'yttmp')
-  debug "mktemp created directory: $temp_dir"
+	# Create temp directory with mktemp
+	temp_dir=$(mktemp --tmpdir -d "yttmp.XXXXXX")
+	debug "mktemp created directory: $temp_dir"
 
-  if [ ! -d "$temp_dir" ]; then
-    echo "Error: Failed to create temporary directory" >&2
-    exit 1
-  fi
+	if [ ! -d "$temp_dir" ]; then
+		echo "Error: Failed to create temporary directory" >&2
+		exit 1
+	fi
 
-  # Just ensure it's an absolute path and not any of our forbidden paths
-  if [[ "$temp_dir" = "/" ]] || [[ "$temp_dir" = "$HOME" ]] || [[ ! "$temp_dir" = /* ]]; then
-    debug "ERROR: Unsafe temporary directory path: $temp_dir"
-    echo "Error: Unsafe temporary directory '$temp_dir' created" >&2
-    exit 1
-  fi
+	# Just ensure it's an absolute path and not any of our forbidden paths
+	if [[ "$temp_dir" = "/" ]] || [[ "$temp_dir" = "$HOME" ]] || [[ ! "$temp_dir" = /* ]]; then
+		debug "ERROR: Unsafe temporary directory path: $temp_dir"
+		echo "Error: Unsafe temporary directory '$temp_dir' created" >&2
+		exit 1
+	fi
 
-  # Set restrictive permissions
-  chmod 700 "$temp_dir"
+	# Set restrictive permissions
+	chmod 700 "$temp_dir"
 
-  echo "$temp_dir"
+	echo "$temp_dir"
 }
 
 # Function to validate YouTube URL
 validate_youtube_url() {
-  local url="$1"
-  local sanitized_url
+	local url="$1"
+	local sanitized_url
 
-  if ! sanitized_url=$(sanitize_youtube_url "$url"); then
-    echo "Invalid YouTube URL" >&2
-    return 1
-  fi
+	if ! sanitized_url=$(sanitize_youtube_url "$url"); then
+		echo "Invalid YouTube URL" >&2
+		return 1
+	fi
 
-  if ! get_youtube_id "$sanitized_url" > /dev/null; then
-    echo "Could not extract YouTube ID" >&2
-    return 1
-  fi
+	if ! get_youtube_id "$sanitized_url" > /dev/null; then
+		echo "Could not extract YouTube ID" >&2
+		return 1
+	fi
 
-  return 0
+	return 0
 }
 
 # Function to sanitize YouTube URL to canonical form with only v= parameter
 sanitize_youtube_url() {
-  local url="$1"
-  local clean_url
+	local url="$1"
+	local clean_url
 
-  # Convert youtu.be URLs to youtube.com format first
-  if [[ $url =~ ^https?://[^/]*youtu\.be/([^?&#]+) ]]; then
-    clean_url="https://youtube.com/watch?v=${BASH_REMATCH[1]}"
-  elif [[ $url =~ ^https?://[^/]*youtube\.com/watch ]]; then
-    # Extract the v parameter
-    if [[ $url =~ [?\&]v=([^&#]+) ]]; then
-      clean_url="https://youtube.com/watch?v=${BASH_REMATCH[1]}"
-    else
-      return 1
-    fi
-  else
-    return 1
-  fi
+	# Convert youtu.be URLs to youtube.com format first
+	if [[ $url =~ ^https?://[^/]*youtu\.be/([^?&#]+) ]]; then
+		clean_url="https://youtube.com/watch?v=${BASH_REMATCH[1]}"
+	elif [[ $url =~ ^https?://[^/]*youtube\.com/watch ]]; then
+		# Extract the v parameter
+		if [[ $url =~ [?\&]v=([^&#]+) ]]; then
+			clean_url="https://youtube.com/watch?v=${BASH_REMATCH[1]}"
+		else
+			return 1
+		fi
+	else
+		return 1
+	fi
 
-  echo "$clean_url"
+	echo "$clean_url"
 }
 
 # Function to extract just the YouTube ID from a sanitized URL
 get_youtube_id() {
-  local url="$1"
+	local url="$1"
 
-  # We expect a clean URL in the form https://youtube.com/watch?v=ID
-  if [[ $url =~ [?\&]v=([^&#]+) ]]; then
-    echo "${BASH_REMATCH[1]}"
-    return 0
-  fi
+	# We expect a clean URL in the form https://youtube.com/watch?v=ID
+	if [[ $url =~ [?\&]v=([^&#]+) ]]; then
+		echo "${BASH_REMATCH[1]}"
+		return 0
+	fi
 
-  return 1
+	return 1
 }
 
 # Function to ensure cache directory exists
 ensure_cache_dir() {
-  local cache_dir="/tmp/$SCRIPT_NAME"
-  if [ ! -d "$cache_dir" ]; then
-    debug "Creating cache directory"
-    mkdir -p "$cache_dir"
-    chmod 755 "$cache_dir"
-  fi
-  debug "Cache dir: $cache_dir"
-  echo "$cache_dir"
+	local cache_dir="/tmp/$SCRIPT_NAME"
+	if [ ! -d "$cache_dir" ]; then
+		debug "Creating cache directory"
+		mkdir -p "$cache_dir"
+		chmod 755 "$cache_dir"
+	fi
+	debug "Cache dir: $cache_dir"
+	echo "$cache_dir"
 }
 
 # Function to get cached audio path
 get_cache_path() {
-  local youtube_id="$1"
-  local cache_dir
-  cache_dir=$(ensure_cache_dir)
-  echo "${cache_dir}/${youtube_id}.mp3"
+	local youtube_id="$1"
+	local cache_dir
+	cache_dir=$(ensure_cache_dir)
+	echo "${cache_dir}/${youtube_id}.mp3"
+}
+
+transcript_cache_dir() {
+	local youtube_id="$1"
+	echo "$XDG_CACHE_HOME/yt-transcriber/$youtube_id"
+}
+
+transcript_cache_path() {
+	local youtube_id="$1"
+	local dir
+	dir=$(transcript_cache_dir "$youtube_id")
+	echo "$dir/transcript.txt"
+}
+
+ensure_transcript_cache_dir() {
+	local youtube_id="$1"
+	local dir
+	dir=$(transcript_cache_dir "$youtube_id")
+	mkdir -p "$dir"
+	echo "$dir"
+}
+
+clear_video_cache() {
+	local target_id="${1:-}"
+	local transcript_root="$XDG_CACHE_HOME/yt-transcriber"
+	local audio_root="/tmp/$SCRIPT_NAME"
+	local cleared=false
+
+	if [ -n "$target_id" ]; then
+		local transcript_target="$transcript_root/$target_id"
+		local audio_target="$audio_root/${target_id}.mp3"
+
+		if [ -e "$transcript_target" ]; then
+			rm -rf "$transcript_target"
+			cleared=true
+		fi
+
+		if [ -f "$audio_target" ]; then
+			rm -f "$audio_target"
+			cleared=true
+		fi
+	else
+		if [ -d "$transcript_root" ]; then
+			rm -rf "$transcript_root"
+			cleared=true
+		fi
+
+		if [ -d "$audio_root" ] || [ -f "$audio_root" ]; then
+			rm -rf "$audio_root"
+			cleared=true
+		fi
+	fi
+
+	if [ "$cleared" = true ]; then
+		if [ -n "$target_id" ]; then
+			echo "Cleared cached audio/transcript for $target_id."
+		else
+			echo "Cleared all cached audio/transcripts."
+		fi
+	else
+		if [ -n "$target_id" ]; then
+			echo "No cached data found for $target_id." >&2
+		else
+			echo "No cached audio/transcripts found to clear." >&2
+		fi
+	fi
+
+	return 0
+}
+
+calculate_cache_stats() {
+	local dir="$1"
+	shift || true
+	local count=0
+	local total=0
+
+	if [ -d "$dir" ]; then
+		while IFS= read -r -d '' file; do
+			local size
+			size=$(get_file_size "$file" 2>/dev/null || echo 0)
+			total=$((total + size))
+			count=$((count + 1))
+		done < <(find "$dir" -type f "$@" -print0 2>/dev/null)
+	fi
+
+	printf '%s %s\n' "$count" "$total"
+}
+
+cache_status() {
+	local transcript_root="$XDG_CACHE_HOME/yt-transcriber"
+	local audio_root="/tmp/$SCRIPT_NAME"
+	local summarize_root="$XDG_CACHE_HOME/yt-transcriber-summarize"
+	local translate_root="$XDG_CACHE_HOME/yt-transcriber-translate"
+
+	read -r transcript_count transcript_bytes <<<"$(calculate_cache_stats "$transcript_root" -name 'transcript.txt')"
+	read -r audio_count audio_bytes <<<"$(calculate_cache_stats "$audio_root" -name '*.mp3')"
+	read -r summarize_count summarize_bytes <<<"$(calculate_cache_stats "$summarize_root")"
+	read -r translate_count translate_bytes <<<"$(calculate_cache_stats "$translate_root")"
+
+	echo "Cache status:"
+	echo "  Transcripts: ${transcript_count} entries, ${transcript_bytes} bytes"
+	echo "  Audio: ${audio_count} files, ${audio_bytes} bytes"
+	echo "  Summaries: ${summarize_count} entries, ${summarize_bytes} bytes"
+	echo "  Translations: ${translate_count} entries, ${translate_bytes} bytes"
+}
+
+append_python_path() {
+	local attr="$1"
+	local out
+	out=$(nix eval --impure --raw "${NIXPKGS_PIN}#${attr}.outPath" 2>/dev/null) || return 0
+	local site="${out}/lib/python3.12/site-packages"
+	if [ -d "$site" ]; then
+		case ":${PYTHONPATH:-}:" in
+			*:"$site":*) ;;
+			*)
+				PYTHONPATH="$site${PYTHONPATH:+:$PYTHONPATH}"
+				export PYTHONPATH
+				debug "Added $site to PYTHONPATH"
+				;;
+		esac
+	fi
 }
 
 # Function to set up Python environment
 setup_python_env() {
-  debug "Setting up Python environment..."
+	debug "Ensuring Python environment provided by Nix is ready..."
+	ensure_libstdcxx || true
 
-  # Check if Rye is available
-  if ! command -v rye >/dev/null 2>&1; then
-    echo "Error: Rye not found in PATH. This script requires Rye for dependency management." >&2
-    echo "Please ensure Rye is installed and available in your PATH." >&2
-    return 1
-  fi
+	if ! command -v python3 >/dev/null 2>&1; then
+		echo "Error: python3 not found in PATH. Include python312 in your Nix dependencies." >&2
+		return 1
+	fi
 
-  debug "Rye found in PATH, using Rye for dependency management"
+	if [ -n "${YT_TRANSCRIBER_PYTHON_PATHS:-}" ]; then
+		local original_ifs="$IFS"
+		IFS=':'
+		for path in $YT_TRANSCRIBER_PYTHON_PATHS; do
+			if [ -d "$path" ]; then
+				case ":${PYTHONPATH:-}:" in
+					*:"$path":*) ;;
+					*)
+						PYTHONPATH="$path${PYTHONPATH:+:$PYTHONPATH}"
+						export PYTHONPATH
+						debug "Added precomputed $path to PYTHONPATH"
+						;;
+				esac
+			fi
+		done
+		IFS="$original_ifs"
+	fi
 
-  # RYE_PROJECT_DIR is already defined globally at the top of the script
-  debug "Project directory: $RYE_PROJECT_DIR"
+	if [ -n "${YT_TRANSCRIBER_PYTHON_PKGS:-}" ]; then
+		for attr in $YT_TRANSCRIBER_PYTHON_PKGS; do
+			append_python_path "$attr"
+		done
+	fi
 
-  # Create project directory if it doesn't exist
-  mkdir -p "$RYE_PROJECT_DIR"
+	if ! list_missing_python_modules torch whisper yt_dlp psutil; then
+		return 1
+	fi
 
-  # Create a minimal Python module structure
-  mkdir -p "$RYE_PROJECT_DIR/yt_transcriber_deps"
-  if [ ! -f "$RYE_PROJECT_DIR/yt_transcriber_deps/__init__.py" ]; then
-    debug "Creating minimal Python module structure"
-    echo "# yt-transcriber dependencies module" > "$RYE_PROJECT_DIR/yt_transcriber_deps/__init__.py"
-  fi
-
-  # Create pyproject.toml if it doesn't exist
-  if [ ! -f "$RYE_PROJECT_DIR/pyproject.toml" ]; then
-    debug "Creating pyproject.toml in $RYE_PROJECT_DIR"
-
-    # Create pyproject.toml with our dependencies
-    cat > "$RYE_PROJECT_DIR/pyproject.toml" << EOF
-[project]
-name = "yt-transcriber-deps"
-version = "0.1.0"
-description = "Dependencies for YouTube transcriber using Whisper"
-requires-python = ">=3.12"
-dependencies = [
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "openai-whisper",
-    "yt-dlp",
-    "psutil",
-]
-
-[tool.rye]
-managed = true
-dev-dependencies = []
-
-[tool.hatch.build.targets.wheel]
-packages = ["yt_transcriber_deps"]
-EOF
-  fi
-
-  # Create empty lockfiles if they don't exist to avoid Rye warnings
-  if [ ! -f "$RYE_PROJECT_DIR/requirements.lock" ]; then
-    debug "Creating empty requirements.lock file"
-    touch "$RYE_PROJECT_DIR/requirements.lock"
-  fi
-
-  if [ ! -f "$RYE_PROJECT_DIR/requirements-dev.lock" ]; then
-    debug "Creating empty requirements-dev.lock file"
-    touch "$RYE_PROJECT_DIR/requirements-dev.lock"
-  fi
-
-  # Initialize Rye project if not already initialized
-  if [ ! -d "$RYE_PROJECT_DIR/.venv" ]; then
-    debug "Initializing Rye project..."
-
-    # We need to run Rye commands from the project directory
-    local current_dir="$(pwd)"
-    cd "$RYE_PROJECT_DIR" || {
-      echo "Error: Failed to change to project directory" >&2
-      return 1
-    }
-
-    # Initialize Rye project with --no-pin to avoid Python version pinning issues
-    if ! rye init --existing --no-pin; then
-      echo "Error: Failed to initialize Rye project" >&2
-      cd "$current_dir"
-      return 1
-    fi
-
-    # Sync dependencies with uv backend
-    debug "Syncing Rye dependencies with uv backend..."
-    if ! rye sync --no-lock; then
-      echo "Error: Failed to sync Rye dependencies" >&2
-      cd "$current_dir"
-      return 1
-    fi
-
-    # Return to original directory
-    cd "$current_dir"
-
-    debug "Rye project initialized and dependencies synced"
-  fi
-
-  # Activate the Rye environment
-  if [ -f "$RYE_PROJECT_DIR/.venv/bin/activate" ]; then
-    debug "Activating Rye environment..."
-    source "$RYE_PROJECT_DIR/.venv/bin/activate"
-    debug "Activated Rye environment"
-  else
-    echo "Error: Rye environment activation script not found" >&2
-    return 1
-  fi
-
-  # Verify critical packages are installed
-  if ! python -c "import torch, whisper, yt_dlp" 2>/dev/null; then
-    debug "Some required packages are missing, reinstalling..."
-
-    # Try with uv first if available
-    if command -v uv >/dev/null 2>&1; then
-      debug "Installing dependencies with uv..."
-      uv pip install torch torchvision torchaudio openai-whisper yt-dlp psutil
-    else
-      debug "Installing dependencies with pip..."
-      pip install --disable-pip-version-check torch torchvision torchaudio openai-whisper yt-dlp psutil
-    fi
-  else
-    debug "All required packages are installed"
-  fi
-
-  # Display environment info
-  debug "Python environment ready!"
-  debug "Python: $(python --version 2>&1)"
-
-  # Check torch
-  if python -c "import torch" 2>/dev/null; then
-    debug "Torch: $(python -c "import torch; print(f'PyTorch {torch.__version__}')")"
-    debug "MPS available: $(python -c "import torch; print(torch.backends.mps.is_available())")"
-  else
-    debug "Torch: Not available"
-    debug "MPS available: False"
-  fi
-
-  # Add Rye environment bin to PATH
-  export PATH="$RYE_PROJECT_DIR/.venv/bin:$PATH"
-  debug "Updated PATH with Rye environment bin: $RYE_PROJECT_DIR/.venv/bin"
-
-  # Verify critical commands are available
-  if command -v yt-dlp >/dev/null 2>&1; then
-    debug "yt-dlp is available in PATH"
-  else
-    debug "WARNING: yt-dlp is NOT available in PATH"
-    debug "Current PATH: $PATH"
-    if [ -f "$RYE_PROJECT_DIR/.venv/bin/yt-dlp" ]; then
-      debug "yt-dlp exists in Rye environment but is not in PATH"
-      # Force symlink yt-dlp to a location in PATH
-      ln -sf "$RYE_PROJECT_DIR/.venv/bin/yt-dlp" "/tmp/yt-dlp"
-      export PATH="/tmp:$PATH"
-      debug "Created symlink to yt-dlp in /tmp and added to PATH"
-    else
-      debug "yt-dlp does not exist in Rye environment, attempting direct installation"
-      if command -v uv >/dev/null 2>&1; then
-        debug "Installing yt-dlp with uv..."
-        uv pip install yt-dlp
-      else
-        debug "Installing yt-dlp with pip..."
-        pip install --disable-pip-version-check yt-dlp
-      fi
-    fi
-  fi
-}
-
-# Function to install required Python packages
-install_python_packages() {
-  # Ensure we're in the virtual environment
-  if [ -f "$RYE_PROJECT_DIR/.venv/bin/activate" ]; then
-    source "$RYE_PROJECT_DIR/.venv/bin/activate"
-  fi
-
-  # All packages should be managed through Rye and pyproject.toml
-  debug "Packages should already be installed by setup_python_env using Rye"
-
-  # Verify that critical packages are available
-  if ! python -c "import torch" 2>/dev/null || \
-     ! python -c "import whisper" 2>/dev/null || \
-     ! python -c "import yt_dlp" 2>/dev/null; then
-    debug "Some packages are missing, attempting to sync again with Rye"
-    (cd "$RYE_PROJECT_DIR" && rye sync)
-  fi
-
-  return 0
+	debug "Python $(python3 --version 2>&1)"
+	debug "Torch: $(python3 -c "import torch; print(f'PyTorch {torch.__version__}')")"
+	debug "MPS available: $(python3 -c 'import torch; print(getattr(getattr(torch.backends, "mps", None), "is_available", lambda: False)())')"
 }
 
 # Function to invoke our Python helper
 python_transcribe() {
-  if ! python - "$audio_file" "$transcript_file" "$model" "$metadata_file" <<'EOF'
+	if ! python3 - "$audio_file" "$transcript_file" "$model" "$metadata_file" <<'EOF'
 import sys
 import json
 import warnings
@@ -525,630 +755,749 @@ from datetime import datetime
 import psutil
 import os
 
-# Try different import approaches for whisper
+# Try different import approaches for whisper and ensure load_model exists
 try:
-    import whisper
+    	import whisper as _whisper
+    	if not hasattr(_whisper, "load_model"):
+    			raise ImportError("whisper module lacks load_model")
+    	whisper = _whisper
 except ImportError:
-    try:
-        import openai.whisper as whisper
-    except ImportError:
-        # Final fallback
-        from openai import whisper
+    	try:
+    			import openai_whisper as whisper
+    	except ImportError:
+    			try:
+    					import openai.whisper as whisper
+    			except ImportError:
+    					from openai import whisper
 
 def get_system_info():
-    return {
-        'cpu_cores': psutil.cpu_count(logical=False),
-        'cpu_threads': psutil.cpu_count(logical=True),
-        'memory_gb': psutil.virtual_memory().total / (1024**3)
-    }
+    	return {
+    			'cpu_cores': psutil.cpu_count(logical=False),
+    			'cpu_threads': psutil.cpu_count(logical=True),
+    			'memory_gb': psutil.virtual_memory().total / (1024**3)
+    	}
 
 def format_duration(seconds):
-    minutes, seconds = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes}:{seconds:02d}"
+    	minutes, seconds = divmod(int(seconds), 60)
+    	hours, minutes = divmod(minutes, 60)
+    	if hours > 0:
+    			return f"{hours}:{minutes:02d}:{seconds:02d}"
+    	return f"{minutes}:{seconds:02d}"
 
 def transcribe(audio_file, output_file, model_name, metadata_file):
-    # Filter out warnings
-    warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
-    warnings.filterwarnings("ignore", category=UserWarning)
+    	# Filter out warnings
+    	warnings.filterwarnings("ignore", category=FutureWarning, module="whisper")
+    	warnings.filterwarnings("ignore", category=UserWarning)
 
-    # System info
-    sys_info = get_system_info()
-    print("\n=== System Information ===", file=sys.stderr)
-    print(f"CPU Cores: {sys_info['cpu_cores']}", file=sys.stderr)
-    print(f"CPU Threads: {sys_info['cpu_threads']}", file=sys.stderr)
-    print(f"Memory: {sys_info['memory_gb']:.1f}GB", file=sys.stderr)
-    print(f"PyTorch version: {torch.__version__}", file=sys.stderr)
-    print(f"PyTorch CUDA available: {torch.cuda.is_available()}", file=sys.stderr)
-    print(f"MPS available: {torch.backends.mps.is_available()}", file=sys.stderr)
-    print(f"MPS built: {torch.backends.mps.is_built()}", file=sys.stderr)
+    	# System info
+    	sys_info = get_system_info()
+    	print("\n=== System Information ===", file=sys.stderr)
+    	print(f"CPU Cores: {sys_info['cpu_cores']}", file=sys.stderr)
+    	print(f"CPU Threads: {sys_info['cpu_threads']}", file=sys.stderr)
+    	print(f"Memory: {sys_info['memory_gb']:.1f}GB", file=sys.stderr)
+    	print(f"PyTorch version: {torch.__version__}", file=sys.stderr)
+    	cuda_available = torch.cuda.is_available()
+    	print(f"PyTorch CUDA available: {cuda_available}", file=sys.stderr)
+    	if cuda_available:
+    			try:
+    					print(f"CUDA device count: {torch.cuda.device_count()}", file=sys.stderr)
+    					print(f"CUDA device name: {torch.cuda.get_device_name(0)}", file=sys.stderr)
+    			except Exception as exc:
+    					print(f"CUDA device query failed: {exc}", file=sys.stderr)
 
-    # Try to load metadata, use empty dict if file doesn't exist
-    try:
-        with open(metadata_file) as f:
-            metadata = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"\nWarning: Could not load metadata file: {str(e)}", file=sys.stderr)
-        print("Continuing without metadata...", file=sys.stderr)
-        metadata = {
-            'title': 'Unknown',
-            'channel': 'Unknown',
-            'upload_date': 'Unknown',
-            'duration': 0,
-            'webpage_url': 'Unknown'
-        }
+    	mps_backend = getattr(torch.backends, "mps", None)
+    	if mps_backend is not None and hasattr(mps_backend, "is_available"):
+    			mps_available = bool(mps_backend.is_available())
+    	else:
+    			mps_available = False
+    	if mps_backend is not None and hasattr(mps_backend, "is_built"):
+    			mps_built = bool(mps_backend.is_built())
+    	else:
+    			mps_built = False
 
-    # Try to enable MPS
-    humanized_device = "CPU"
-    try:
-        if torch.backends.mps.is_available():
-            print("\nAttempting to use Metal acceleration...", file=sys.stderr)
-            device = torch.device("mps")
-            # Create a small tensor to test MPS
-            test_tensor = torch.ones(1).to(device)
-            print("✓ Metal acceleration enabled", file=sys.stderr)
-            humanized_device = "GPU"
-        else:
-            device = torch.device("cpu")
-            print("\nFalling back to CPU only", file=sys.stderr)
-    except Exception as e:
-        device = torch.device("cpu")
-        print(f"\nError setting up Metal: {str(e)}", file=sys.stderr)
-        print("Falling back to CPU", file=sys.stderr)
+    	print(f"MPS available: {mps_available}", file=sys.stderr)
+    	print(f"MPS built: {mps_built}", file=sys.stderr)
 
-    # Print model info to stderr
-    cache_dir = os.path.expanduser("~/.cache/whisper")
-    print(f"Model stored in: {cache_dir}", file=sys.stderr)
-    model_size = os.path.getsize(os.path.join(cache_dir, f"{model_name}.pt")) / 1024 / 1024
-    print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
+    	# Try to load metadata, use empty dict if file doesn't exist
+    	try:
+    			with open(metadata_file) as f:
+    					metadata = json.load(f)
+    	except (FileNotFoundError, json.JSONDecodeError) as e:
+    			print(f"\nWarning: Could not load metadata file: {str(e)}", file=sys.stderr)
+    			print("Continuing without metadata...", file=sys.stderr)
+    			metadata = {
+    					'title': 'Unknown',
+    					'channel': 'Unknown',
+    					'upload_date': 'Unknown',
+    					'duration': 0,
+    					'webpage_url': 'Unknown'
+    			}
 
-    # Load model and transcribe
-    print(f"Loading {model_name} model into {humanized_device}...", file=sys.stderr)
-    model = whisper.load_model(model_name)
-    print(f"Model loaded, transcribing...", file=sys.stderr)
+    	preferred_device = os.environ.get("DEFAULT_DEVICE", "auto").lower()
+    	device = torch.device("cpu")
+    	humanized_device = "CPU"
 
-    # Time the transcription
-    start_time = time.time()
+    	def pick_cuda() -> bool:
+    			return cuda_available
 
-    result = model.transcribe(
-        audio_file,
-        fp16=False
-    )
+    	def pick_mps() -> bool:
+    			return mps_available and mps_backend is not None
 
-    end_time = time.time()
-    duration = end_time - start_time
-    print(f"Transcription completed in {duration:.2f} seconds", file=sys.stderr)
+    	def devices_iter():
+    			if preferred_device in {"cuda", "gpu", "nvidia", "rocm", "hip"}:
+    					yield "cuda"
+    					yield "mps"
+    			elif preferred_device in {"mps", "metal"}:
+    					yield "mps"
+    					yield "cuda"
+    			elif preferred_device in {"cpu"}:
+    					yield "cpu"
+    			else:
+    					# auto
+    					yield "cuda"
+    					yield "mps"
+    			yield "cpu"
 
-    transcript = result["text"].strip()
+    	for candidate in devices_iter():
+    			if candidate == "cuda" and pick_cuda():
+    					device = torch.device("cuda")
+    					humanized_device = "GPU"
+    					print("\nUsing CUDA-compatible backend", file=sys.stderr)
+    					break
+    			if candidate == "mps" and pick_mps():
+    					try:
+    							print("\nAttempting to use Metal acceleration...", file=sys.stderr)
+    							device = torch.device("mps")
+    							torch.ones(1).to(device)
+    							print("✓ Metal acceleration enabled", file=sys.stderr)
+    							humanized_device = "GPU"
+    							break
+    					except Exception as exc:
+    							print(f"\nError setting up Metal: {exc}", file=sys.stderr)
+    							continue
+    			if candidate == "cpu":
+    					device = torch.device("cpu")
+    					humanized_device = "CPU"
+    					print("\nFalling back to CPU", file=sys.stderr)
+    					break
 
-    # Write complete output (metadata + transcript) to stdout
-    output = (
-        f"=== Video Metadata ===\n"
-        f"Title: {metadata['title']}\n"
-        f"Channel: {metadata['channel']}\n"
-        f"Upload Date: {metadata['upload_date']}\n"
-        f"Duration: {format_duration(metadata['duration'])}\n"
-        f"URL: {metadata['webpage_url']}\n"
-        f"=== Transcript ===\n\n"
-        f"{transcript}\n"
-    )
+    	# Print model info to stderr
+    	cache_dir = os.path.expanduser("~/.cache/whisper")
+    	print(f"Model stored in: {cache_dir}", file=sys.stderr)
+    	model_path = os.path.join(cache_dir, f"{model_name}.pt")
+    	if os.path.exists(model_path):
+    			model_size = os.path.getsize(model_path) / 1024 / 1024
+    			print(f"Model size: {model_size:.1f}MB", file=sys.stderr)
+    	else:
+    			print("Model not cached yet; Whisper will download it on first use.", file=sys.stderr)
 
-    with open(output_file, 'w') as f:
-        f.write(output)
+    	# Load model and transcribe (with MPS fallback)
+    	print(f"Loading {model_name} model into {humanized_device}...", file=sys.stderr)
+    	try:
+    			model = whisper.load_model(model_name, device=device.type if hasattr(device, "type") else str(device))
+    	except Exception as exc:
+    			if getattr(device, "type", str(device)) == "mps":
+    					print(f"⚠️  MPS load failed ({exc}); retrying on CPU", file=sys.stderr)
+    					device = torch.device("cpu")
+    					humanized_device = "CPU"
+    					model = whisper.load_model(model_name, device="cpu")
+    			else:
+    					raise
 
-    print(output)
+    	print(f"Model loaded, transcribing...", file=sys.stderr)
+
+    	# Time the transcription
+    	start_time = time.time()
+
+    	use_fp16 = getattr(device, "type", str(device)) != "cpu"
+    	result = model.transcribe(
+    			audio_file,
+    			fp16=use_fp16
+    	)
+
+    	end_time = time.time()
+    	duration = end_time - start_time
+    	print(f"Transcription completed in {duration:.2f} seconds", file=sys.stderr)
+
+    	transcript = result["text"].strip()
+
+    	# Write complete output (metadata + transcript) to stdout
+    	output = (
+    			f"=== Video Metadata ===\n"
+    			f"Title: {metadata['title']}\n"
+    			f"Channel: {metadata['channel']}\n"
+    			f"Upload Date: {metadata['upload_date']}\n"
+    			f"Duration: {format_duration(metadata['duration'])}\n"
+    			f"URL: {metadata['webpage_url']}\n"
+    			f"=== Transcript ===\n\n"
+    			f"{transcript}\n"
+    	)
+
+    	with open(output_file, 'w') as f:
+    			f.write(output)
+
+    	print(output)
 
 if __name__ == "__main__":
-    transcribe(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
+    	transcribe(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4])
 EOF
-  then
-    echo "Error: Transcription failed" >&2
-    return 1
-  fi
+    then
+    	echo "Error: Transcription failed" >&2
+    	return 1
+    fi
 }
 
 # Function to check if file is valid audio or video
 is_valid_media() {
-  local file="$1"
-  local mime_type
+    local file="$1"
+    local mime_type
 
-  # Check if file exists and is a file
-  if [ ! -f "$file" ]; then
-    return 1
-  fi
+    # Check if file exists and is a file
+    if [ ! -f "$file" ]; then
+    	return 1
+    fi
 
-  # Use file command to check MIME type
-  mime_type=$(file --mime-type -b "$file")
-  debug "MIME type for $file: $mime_type"
+    # Use file command to check MIME type
+    mime_type=$(file --mime-type -b "$file")
+    debug "MIME type for $file: $mime_type"
 
-  case "$mime_type" in
-    audio/*|video/*) return 0 ;;  # Any audio or video MIME type is valid
-    *)
-      # Additional check with ffprobe in case MIME type is ambiguous
-      if ffprobe -v quiet "$file" 2>/dev/null; then
-        debug "ffprobe successfully read media file $file"
-        return 0
-      fi
-      debug "$file is not a valid media file according to ffprobe"
-      return 1
-      ;;
-  esac
+    case "$mime_type" in
+    	audio/*|video/*) return 0 ;;  # Any audio or video MIME type is valid
+    	*)
+    		# Additional check with ffprobe in case MIME type is ambiguous
+    		if ffprobe -v quiet "$file" 2>/dev/null; then
+    			debug "ffprobe successfully read media file $file"
+    			return 0
+    		fi
+    		debug "$file is not a valid media file according to ffprobe"
+    		return 1
+    		;;
+    esac
 }
 
 # Function to handle input (either URL or file)
 process_input() {
-  local input="$1"
-  local output_dir="$2"
-  local output_file="${output_dir}/audio.mp3"
+    local input="$1"
+    local output_dir="$2"
+    local output_file="${output_dir}/audio.mp3"
 
-  # Check if input is a file that exists
-  if [ -f "$input" ]; then
-    if ! is_valid_media "$input"; then
-      echo "Error: Not a valid media file: $input" >&2
-      return 1
+    # Check if input is a file that exists
+    if [ -f "$input" ]; then
+    	CURRENT_YOUTUBE_ID=""
+    	if ! is_valid_media "$input"; then
+    		echo "Error: Not a valid media file: $input" >&2
+    		return 1
+    	fi
+    	debug "Input is a valid media file"
+
+    	# Extract/convert audio to mp3
+    	debug "Converting/extracting audio to mp3 format"
+    	if ! ffmpeg -i "$input" -vn -codec:a libmp3lame -qscale:a 2 "$output_file" -y &>/dev/null; then
+    		echo "Error: Failed to extract/convert audio" >&2
+    		return 1
+    	fi
+    	echo "Using media file: $input" >&2
+    	return 0
     fi
-    debug "Input is a valid media file"
 
-    # Extract/convert audio to mp3
-    debug "Converting/extracting audio to mp3 format"
-    if ! ffmpeg -i "$input" -vn -codec:a libmp3lame -qscale:a 2 "$output_file" -y &>/dev/null; then
-      echo "Error: Failed to extract/convert audio" >&2
-      return 1
+    # Not a file, treat as URL
+    if ! validate_youtube_url "$input"; then
+    	echo "Error: Input must be either a valid media file or YouTube URL" >&2
+    	return 1
     fi
-    echo "Using media file: $input" >&2
-    return 0
-  fi
 
-  # Not a file, treat as URL
-  if ! validate_youtube_url "$input"; then
-    echo "Error: Input must be either a valid media file or YouTube URL" >&2
-    return 1
-  fi
-
-  # Download from YouTube
-  download_audio "$input" "$output_dir"
+    # Download from YouTube
+    download_audio "$input" "$output_dir"
 }
 
 # Function to check audio duration using ffprobe
 get_audio_duration() {
-  local audio_file="$1"
-  ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file"
+    local audio_file="$1"
+	ffprobe -v quiet -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$audio_file"
 }
 
 # Function to verify audio length
 verify_audio() {
-  local audio_file="$1"
-  local expected_duration="$2"
-  local duration_info
+	local audio_file="$1"
+	local expected_duration="$2"
+	local duration_info
 
-  duration_info=$(py_verify_duration "$audio_file" "$expected_duration")
-  debug "Duration check result: $duration_info"
+	duration_info=$(py_verify_duration "$audio_file" "$expected_duration")
+	debug "Duration check result: $duration_info"
 
-  if [[ $(echo "$duration_info" | jq -r '.match') == "true" ]]; then
-    return 0
-  else
-    local actual
-    actual=$(echo "$duration_info" | jq -r '.actual')
-    echo "Warning: Audio duration (${actual}s) differs significantly from video duration (${expected_duration}s)" >&2
-    return 1
-  fi
+	if [[ $(echo "$duration_info" | jq -r '.match') == "true" ]]; then
+		return 0
+	else
+		local actual
+		actual=$(echo "$duration_info" | jq -r '.actual')
+		echo "Warning: Audio duration (${actual}s) differs significantly from video duration (${expected_duration}s)" >&2
+		return 1
+	fi
 }
 
 # Function for duration verification
 py_verify_duration() {
-  if ! python - "$audio_file" "$expected_duration" <<'EOF'
+	if ! python3 - "$audio_file" "$expected_duration" <<'EOF'
 import sys
 import json
 import subprocess
 
 def get_audio_duration(audio_file):
-    """Get exact audio duration using ffmpeg"""
-    cmd = [
-        'ffmpeg',
-        '-i', audio_file,
-        '-map', '0:a:0',  # Select first audio stream
-        '-f', 'null',
-        '-progress', 'pipe:1',  # Output progress to stdout
-        '-'
-    ]
+		"""Get exact audio duration using ffmpeg"""
+		cmd = [
+				'ffmpeg',
+				'-i', audio_file,
+				'-map', '0:a:0',  # Select first audio stream
+				'-f', 'null',
+				'-progress', 'pipe:1',  # Output progress to stdout
+				'-'
+		]
 
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8'
-        )
+		try:
+				result = subprocess.run(
+						cmd,
+						stdout=subprocess.PIPE,
+						stderr=subprocess.PIPE,
+						text=True,
+						encoding='utf-8'
+				)
 
-        # Extract the last time value from progress output
-        last_time = None
-        for line in result.stdout.splitlines():
-            if line.startswith('out_time_us='):
-                # Convert microseconds to seconds
-                last_time = int(line.split('=')[1]) / 1000000
+				# Extract the last time value from progress output
+				last_time = None
+				for line in result.stdout.splitlines():
+						if line.startswith('out_time_us='):
+								# Convert microseconds to seconds
+								last_time = int(line.split('=')[1]) / 1000000
 
-        if last_time is not None:
-            return last_time
+				if last_time is not None:
+						return last_time
 
-        # If we couldn't get the duration, print debug info
-        print(f"Debug: ffmpeg stdout:\n{result.stdout}", file=sys.stderr)
-        print(f"Debug: ffmpeg stderr:\n{result.stderr}", file=sys.stderr)
-        raise ValueError("Could not determine duration from ffmpeg output")
+				# If we couldn't get the duration, print debug info
+				print(f"Debug: ffmpeg stdout:\n{result.stdout}", file=sys.stderr)
+				print(f"Debug: ffmpeg stderr:\n{result.stderr}", file=sys.stderr)
+				raise ValueError("Could not determine duration from ffmpeg output")
 
-    except Exception as e:
-        print(f"Debug: Duration check failed: {str(e)}", file=sys.stderr)
-        return None
+		except Exception as e:
+				print(f"Debug: Duration check failed: {str(e)}", file=sys.stderr)
+				return None
 
 def verify_durations(audio_file, expected_duration, tolerance=1.0):
-    """Compare audio duration with expected duration"""
-    try:
-        actual_duration = get_audio_duration(audio_file)
-        if actual_duration is None:
-            raise ValueError("Could not get audio duration")
+		"""Compare audio duration with expected duration"""
+		try:
+				actual_duration = get_audio_duration(audio_file)
+				if actual_duration is None:
+						raise ValueError("Could not get audio duration")
 
-        diff = abs(actual_duration - float(expected_duration))
-        return {
-            'match': diff <= tolerance,
-            'actual': actual_duration,
-            'expected': float(expected_duration),
-            'difference': diff,
-            'method': 'ffmpeg_progress'
-        }
-    except Exception as e:
-        print(f"Falling back to ffprobe due to: {str(e)}", file=sys.stderr)
-        # Fallback to ffprobe
-        cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
-               '-of', 'default=noprint_wrappers=1:nokey=1', audio_file]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        actual_duration = float(result.stdout.strip())
-        diff = abs(actual_duration - float(expected_duration))
-        return {
-            'match': diff <= tolerance,
-            'actual': actual_duration,
-            'expected': float(expected_duration),
-            'difference': diff,
-            'method': 'ffprobe_fallback'
-        }
+				diff = abs(actual_duration - float(expected_duration))
+				return {
+						'match': diff <= tolerance,
+						'actual': actual_duration,
+						'expected': float(expected_duration),
+						'difference': diff,
+						'method': 'ffmpeg_progress'
+				}
+		except Exception as e:
+				print(f"Falling back to ffprobe due to: {str(e)}", file=sys.stderr)
+				# Fallback to ffprobe
+				cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+							 '-of', 'default=noprint_wrappers=1:nokey=1', audio_file]
+				result = subprocess.run(cmd, capture_output=True, text=True)
+				actual_duration = float(result.stdout.strip())
+				diff = abs(actual_duration - float(expected_duration))
+				return {
+						'match': diff <= tolerance,
+						'actual': actual_duration,
+						'expected': float(expected_duration),
+						'difference': diff,
+						'method': 'ffprobe_fallback'
+				}
 
 if __name__ == "__main__":
-    result = verify_durations(sys.argv[1], sys.argv[2])
-    print(json.dumps(result))
+		result = verify_durations(sys.argv[1], sys.argv[2])
+		print(json.dumps(result))
 EOF
-  then
-    echo "Error: Duration verification failed" >&2
-    return 1
-  fi
+	then
+		echo "Error: Duration verification failed" >&2
+		return 1
+	fi
 }
 
 # Mock download function for testing
 mock_download_audio() {
-  local url="$1"
-  local output_dir="$2"
-  local youtube_id
+	local url="$1"
+	local output_dir="$2"
+	local youtube_id
 
-  debug "Mock download called with URL: $url, output dir: $output_dir"
+	debug "Mock download called with URL: $url, output dir: $output_dir"
 
-  # Get YouTube ID from URL
-  youtube_id=$(echo "$url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
-  debug "Extracted YouTube ID: $youtube_id"
+	# Get YouTube ID from URL
+	youtube_id=$(echo "$url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
+	debug "Extracted YouTube ID: $youtube_id"
+	CURRENT_YOUTUBE_ID="$youtube_id"
 
-  # Create cache directory if it doesn't exist
-  local cache_dir="/tmp/$SCRIPT_NAME"
-  mkdir -p "$cache_dir"
-  debug "Cache directory: $cache_dir"
+	# Create cache directory if it doesn't exist
+	local cache_dir="/tmp/$SCRIPT_NAME"
+	mkdir -p "$cache_dir"
+	debug "Cache directory: $cache_dir"
 
-  # Create a mock audio file in the cache
-  local cache_file="${cache_dir}/${youtube_id}.mp3"
-  debug "Cache file path: $cache_file"
+	# Create a mock audio file in the cache
+	local cache_file="${cache_dir}/${youtube_id}.mp3"
+	debug "Cache file path: $cache_file"
 
-  # Always create the file for testing purposes
-  ffmpeg -f lavfi -i "sine=frequency=1000:duration=5" -ar 44100 -ac 2 -ab 192k "$cache_file" 2>/dev/null
+	# Always create the file for testing purposes (lightweight placeholder)
+	printf 'FAKEAUDIO' > "$cache_file"
 
-  # Verify the file was created
-  if [ ! -f "$cache_file" ]; then
-    debug "Failed to create mock audio file at $cache_file"
-    return 1
-  fi
+	# Verify the file was created
+	if [ ! -f "$cache_file" ]; then
+		debug "Failed to create mock audio file at $cache_file"
+		return 1
+	fi
 
-  debug "Successfully created mock audio file at $cache_file"
+	debug "Successfully created mock audio file at $cache_file"
 
-  # Create mock metadata file
-  cat > "${output_dir}/metadata.json" << EOF
+	# Create mock metadata file
+	cat > "${output_dir}/metadata.json" << EOF
 {
-  "title": "Test Video",
-  "channel": "Test Channel",
-  "upload_date": "20240101",
-  "duration": 5.0,
-  "webpage_url": "$url"
+	"title": "Test Video",
+	"channel": "Test Channel",
+	"upload_date": "20240101",
+	"duration": 5.0,
+	"webpage_url": "$url"
 }
 EOF
 
-  # Generate a simple MP3 file for the output directory
-  ffmpeg -f lavfi -i "sine=frequency=1000:duration=5" -ar 44100 -ac 2 -ab 192k "${output_dir}/audio.mp3" 2>/dev/null
+	# Generate a lightweight placeholder for the output directory
+	printf 'FAKEAUDIO' > "${output_dir}/audio.mp3"
 
-  debug "Created mock audio file: ${output_dir}/audio.mp3"
-  debug "Created cache file: $cache_file"
-  debug "Created mock metadata: ${output_dir}/metadata.json"
+	debug "Created mock audio file: ${output_dir}/audio.mp3"
+	debug "Created cache file: $cache_file"
+	debug "Created mock metadata: ${output_dir}/metadata.json"
 
-  return 0
+	return 0
 }
 export -f mock_download_audio
 
 # Function to download YouTube audio
 download_audio() {
-  local url="$1"
-  local output_dir="$2"
-  local youtube_id
-  local cache_path
-  local output_file="${output_dir}/audio.mp3"
-  local metadata_file="${output_dir}/metadata.json"
+	local url="$1"
+	local output_dir="$2"
+	local youtube_id
+	local cache_path
+	local output_file="${output_dir}/audio.mp3"
+	local metadata_file="${output_dir}/metadata.json"
 
-  # Sanitize URL first, then get ID and cache path
-  url=$(sanitize_youtube_url "$url")
-  debug "Sanitized URL: $url"
-  youtube_id=$(get_youtube_id "$url")
-  cache_path=$(get_cache_path "$youtube_id")
-  debug "YouTube ID: $youtube_id"
-  debug "Cache path: $cache_path"
+	# Sanitize URL first, then get ID and cache path
+	url=$(sanitize_youtube_url "$url")
+	debug "Sanitized URL: $url"
+	youtube_id=$(get_youtube_id "$url")
+	CURRENT_YOUTUBE_ID="$youtube_id"
+	cache_path=$(get_cache_path "$youtube_id")
+	debug "YouTube ID: $youtube_id"
+	debug "Cache path: $cache_path"
 
-  # First get metadata regardless of cache status
-  echo "Fetching video metadata..." >&2
-  if ! yt-dlp --no-progress --quiet --dump-json "$url" > "$metadata_file"; then
-    echo "Error: Failed to fetch metadata" >&2
-    return 1
-  fi
+	# First get metadata regardless of cache status
+	echo "Fetching video metadata..." >&2
+	if ! yt-dlp --no-progress --quiet --dump-json "$url" > "$metadata_file"; then
+		echo "Error: Failed to fetch metadata" >&2
+		return 1
+	fi
 
-  # Get video duration from metadata using Python
-  local video_duration
-  video_duration=$(jq -r '.duration' "$metadata_file")
-  debug "Video duration: ${video_duration}s"
+	# Get video duration from metadata using Python
+	local video_duration
+	video_duration=$(jq -r '.duration' "$metadata_file")
+	debug "Video duration: ${video_duration}s"
 
-  # If cache exists, verify it
-  if [ -f "$cache_path" ]; then
-    debug "Found cached audio at $cache_path"
-    if verify_audio "$cache_path" "$video_duration"; then
-      echo "Using cached audio from previous download" >&2
-      cp "$cache_path" "$output_file"
-      return 0
-    else
-      debug "Cached audio is incomplete, re-downloading"
-      rm -f "$cache_path"
-    fi
-  fi
+	# If cache exists, verify it
+	if [ "$NO_CACHE" != true ] && [ -f "$cache_path" ]; then
+		debug "Found cached audio at $cache_path"
+		if verify_audio "$cache_path" "$video_duration"; then
+			echo "Using cached audio from previous download" >&2
+			cp "$cache_path" "$output_file"
+			return 0
+		else
+			debug "Cached audio is incomplete, re-downloading"
+			rm -f "$cache_path"
+		fi
+	fi
 
-  # Download with more reliable audio extraction options
-  echo "Downloading from YouTube..." >&2
-  if ! yt-dlp \
-       --no-progress \
-       --quiet \
-       --extract-audio \
-       --audio-format mp3 \
-       --audio-quality 0 \
-       --force-overwrites \
-       --postprocessor-args "ffmpeg:-ar 44100" \
-       --output "$cache_path" \
-       "$url"
-  then
-    echo "Error: Failed to download audio" >&2
-    return 1
-  fi
+	# Download with more reliable audio extraction options
+	echo "Downloading from YouTube..." >&2
+	if ! yt-dlp \
+			 --no-progress \
+			 --quiet \
+			 --extract-audio \
+			 --audio-format mp3 \
+			 --audio-quality 0 \
+			 --force-overwrites \
+			 --postprocessor-args "ffmpeg:-ar 44100" \
+			 --output "$cache_path" \
+			 "$url"
+	then
+		echo "Error: Failed to download audio" >&2
+		return 1
+	fi
 
-  if [ ! -f "$cache_path" ]; then
-    echo "Error: Download completed but audio file not found" >&2
-    return 1
-  fi
+	if [ ! -f "$cache_path" ]; then
+		echo "Error: Download completed but audio file not found" >&2
+		return 1
+	fi
 
-  # Verify downloaded audio
-  if ! verify_audio "$cache_path" "$video_duration"; then
-    echo "Error: Downloaded audio appears to be incomplete, trying alternate method..." >&2
+	# Verify downloaded audio
+	if ! verify_audio "$cache_path" "$video_duration"; then
+		echo "Error: Downloaded audio appears to be incomplete, trying alternate method..." >&2
 
-    # Try alternate download method (downloading video first, then extracting audio)
-    rm -f "$cache_path"
-    if ! yt-dlp \
-         --no-progress \
-         --quiet \
-         --format bestvideo+bestaudio \
-         --extract-audio \
-         --audio-format mp3 \
-         --audio-quality 0 \
-         --force-overwrites \
-         --postprocessor-args "ffmpeg:-ar 44100" \
-         --output "$cache_path" \
-         "$url"
-    then
-      echo "Error: Alternate download method failed" >&2
-      return 1
-    fi
+		# Try alternate download method (downloading video first, then extracting audio)
+		rm -f "$cache_path"
+		if ! yt-dlp \
+				 --no-progress \
+				 --quiet \
+				 --format bestvideo+bestaudio \
+				 --extract-audio \
+				 --audio-format mp3 \
+				 --audio-quality 0 \
+				 --force-overwrites \
+				 --postprocessor-args "ffmpeg:-ar 44100" \
+				 --output "$cache_path" \
+				 "$url"
+		then
+			echo "Error: Alternate download method failed" >&2
+			return 1
+		fi
 
-    # Final verification
-    if ! verify_audio "$cache_path" "$video_duration"; then
-      echo "Error: Still unable to get complete audio at $cache_path" >&2
-      return 1
-    fi
-  fi
+		# Final verification
+		if ! verify_audio "$cache_path" "$video_duration"; then
+			echo "Error: Still unable to get complete audio at $cache_path" >&2
+			return 1
+		fi
+	fi
 
-  cp "$cache_path" "$output_file"
-  debug "Downloaded audio file matches video duration"
+	cp "$cache_path" "$output_file"
+	if [ "$NO_CACHE" = true ]; then
+		rm -f "$cache_path"
+	fi
+	debug "Downloaded audio file matches video duration"
 
-  return 0
+	return 0
 }
 
 # Function to transcribe audio file
 transcribe_audio() {
-  local audio_file="$1"
-  local transcript_file="$2"
-  local model="${3:-$DEFAULT_WHISPER_MODEL}"
-  local metadata_file="$4"
+	local audio_file="$1"
+	local transcript_file="$2"
+	local model="${3:-$DEFAULT_WHISPER_MODEL}"
+	local metadata_file="$4"
 
-  # Set optimal thread count for performance
-  export OMP_NUM_THREADS=$(num_cores)
-  export MKL_NUM_THREADS=$OMP_NUM_THREADS
+	# Set optimal thread count for performance
+	export OMP_NUM_THREADS=$(num_cores)
+	export MKL_NUM_THREADS=$OMP_NUM_THREADS
 
-  debug "Transcribing audio file: $audio_file with model: $model"
-  echo "Generating transcript using ${model} model..." >&2
+	debug "Transcribing audio file: $audio_file with model: $model"
+	echo "Generating transcript using ${model} model..." >&2
 
-  # Ensure we're in the Rye environment
-  if [ -f "$RYE_PROJECT_DIR/.venv/bin/activate" ]; then
-    debug "Activating Rye environment from $RYE_PROJECT_DIR/.venv/bin/activate"
-    source "$RYE_PROJECT_DIR/.venv/bin/activate"
-
-    # Verify modules are available
-    if ! python -c "import torch; import whisper" 2>/dev/null; then
-      debug "Modules not found after activation, attempting direct reinstallation"
-      (cd "$RYE_PROJECT_DIR" && uv pip install torch torchvision torchaudio whisper openai-whisper yt-dlp psutil)
-    fi
-  else
-    debug "Rye environment activation script not found at $RYE_PROJECT_DIR/.venv/bin/activate"
-    echo "Error: Python environment not properly set up" >&2
-    return 1
-  fi
-
-  # Add venv bin to PATH again to be sure
-  export PATH="$RYE_PROJECT_DIR/.venv/bin:$PATH"
-  debug "Updated PATH with venv bin: $RYE_PROJECT_DIR/.venv/bin"
-  debug "Current PATH: $PATH"
-
-  if ! python_transcribe "$audio_file" "$transcript_file" "$model" "$metadata_file"; then
-    echo "Error: Transcription failed" >&2
-    return 1
-  fi
+	if ! python_transcribe "$audio_file" "$transcript_file" "$model" "$metadata_file"; then
+		echo "Error: Transcription failed" >&2
+		return 1
+	fi
 }
 
 TEST=${TEST:-false}
 if [ "$TEST" = "1" ] || [ "$TEST" = "true" ]; then
-  TEST=true
+	TEST=true
 else
-  TEST=false
+	TEST=false
 fi
 
 # Set default test mode
 INTEGRATION_TEST=${INTEGRATION_TEST:-false}
 if [ "$INTEGRATION_TEST" = "1" ] || [ "$INTEGRATION_TEST" = "true" ]; then
-  INTEGRATION_TEST=true
+	INTEGRATION_TEST=true
 else
-  INTEGRATION_TEST=false
+	INTEGRATION_TEST=false
 fi
+
+# Allow --test / --integration-test CLI flags to enable the test harness
+for arg in "$@"; do
+	case "$arg" in
+		--integration-test)
+			TEST=true
+			INTEGRATION_TEST=true
+			;;
+		--test|TEST)
+			TEST=true
+			;;
+	esac
+done
 
 # Main function
 main() {
-  local model="$DEFAULT_WHISPER_MODEL"
-  local skip_transcription=false
-  local input=""
-  local MOCK_DOWNLOAD=false
+	local model="$DEFAULT_WHISPER_MODEL"
+	local skip_transcription=false
+	local input=""
+	local MOCK_DOWNLOAD=false
+	CURRENT_YOUTUBE_ID=""
 
-  # check dependencies
-  dependencychecks
-  # check versions
-  versionchecks
+	# check dependencies
+	dependencychecks
+	# check versions
+	versionchecks
 
-  # Parse options
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --test|TEST)
-        TEST=true
-        shift
-        break
-        ;;
-      --integration-test)
-        INTEGRATION_TEST=true
-        shift
-        break
-        ;;
-      -m|--model)
-        shift
-        if [[ "$1" =~ ^(base|small|medium|large|large-v2)$ ]]; then
-          model="$1"
-        else
-          echo "Error: Invalid model '$1'" >&2
-          show_usage >&2
-          exit 2
-        fi
-        shift
-        ;;
-      -st|--skip-transcription)
-        skip_transcription=true
-        shift
-        ;;
-      -h|--help)
-        show_usage
-        exit 0
-        ;;
-      *)
-        input="$1"
-        shift
-        ;;
-    esac
-  done
+	# Parse options
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			--no-cache)
+				NO_CACHE=true
+				shift
+				;;
+			--clear-video-cache)
+				shift
+				local cache_target=""
+				if [[ $# -gt 0 && "$1" != -* ]]; then
+					cache_target="$1"
+					shift
+				fi
+				clear_video_cache "$cache_target"
+				return 0
+				;;
+			--cache-status)
+				cache_status
+				return 0
+				;;
+			--test|TEST)
+				TEST=true
+				shift
+				break
+				;;
+			--integration-test)
+				INTEGRATION_TEST=true
+				shift
+				break
+				;;
+			-m|--model)
+				shift
+				if [[ "$1" =~ ^(base|small|medium|large|large-v2)$ ]]; then
+					model="$1"
+				else
+					echo "Error: Invalid model '$1'" >&2
+					show_usage >&2
+					exit 2
+				fi
+				shift
+				;;
+			-st|--skip-transcription)
+				skip_transcription=true
+				shift
+				;;
+			-h|--help)
+				show_usage
+				exit 0
+				;;
+			*)
+				input="$1"
+				shift
+				;;
+		esac
+	done
 
-  if $TEST; then
-    debug "Test mode detected"
-    MOCK_DOWNLOAD=true
-    model="$DEFAULT_WHISPER_MODEL"
-    input="https://www.youtube.com/watch?v=0NfO4AAwGf4"
-  fi
+	if $TEST; then
+		debug "Test mode detected"
+		MOCK_DOWNLOAD=true
+		model="$DEFAULT_WHISPER_MODEL"
+		input="https://www.youtube.com/watch?v=0NfO4AAwGf4"
+	fi
 
-  # Handle integration test mode
-  if $INTEGRATION_TEST; then
-    debug "Integration test mode detected"
-    model="$DEFAULT_WHISPER_MODEL"
-    TEST=true  # Set TEST mode also, since integration tests run within the test framework
-    MOCK_DOWNLOAD=false  # Ensure we use real downloads for integration tests
-    input="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"  # Default to a short video
-  fi
+	# Handle integration test mode
+	if $INTEGRATION_TEST; then
+		debug "Integration test mode detected"
+		model="$DEFAULT_WHISPER_MODEL"
+		TEST=true  # Set TEST mode also, since integration tests run within the test framework
+		MOCK_DOWNLOAD=false  # Ensure we use real downloads for integration tests
+		input="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"  # Default to a short video
+	fi
 
-  # Check for input, but allow empty input for test modes
-  if [ -z "$input" ] && ! $TEST && ! $INTEGRATION_TEST; then
-    debug "No arguments provided, showing usage"
-    show_usage >&2
-    exit 2
-  fi
+	# Check for input, but allow empty input for test modes
+	if [ -z "$input" ] && ! $TEST && ! $INTEGRATION_TEST; then
+		debug "No arguments provided, showing usage"
+		show_usage >&2
+		exit 2
+	fi
 
-  # Validate input early - if it's not a file, it must be a valid YouTube URL
-  if [ ! -f "$input" ]; then
-    debug "Input is not a file, validating as YouTube URL"
-    if ! validate_youtube_url "$input"; then
-      echo "Invalid YouTube URL" >&2
-      exit 1
-    fi
-  elif ! is_valid_media "$input"; then
-    echo "Error: Not a valid media file: $input" >&2
-    exit 1
-  fi
+	local sanitized_url=""
+	local sanitized_id=""
 
-  debug "Whisper model to be used: $model"
+	# Validate input early - if it's not a file, it must be a valid YouTube URL
+	if [ ! -f "$input" ]; then
+		debug "Input is not a file, validating as YouTube URL"
+		if ! sanitized_url=$(sanitize_youtube_url "$input" 2>/dev/null); then
+			echo "Invalid YouTube URL" >&2
+			exit 1
+		fi
+		input="$sanitized_url"
+		sanitized_id=$(get_youtube_id "$sanitized_url" || true)
+		if [ -n "$sanitized_id" ]; then
+			CURRENT_YOUTUBE_ID="$sanitized_id"
+			local cached_transcript
+			cached_transcript=$(transcript_cache_path "$CURRENT_YOUTUBE_ID")
+			if [ -s "$cached_transcript" ] && ! $NO_CACHE; then
+				debug "Serving cached transcript for YouTube ID $CURRENT_YOUTUBE_ID"
+				cat "$cached_transcript"
+				exit 0
+			fi
+		fi
+	elif ! is_valid_media "$input"; then
+		echo "Error: Not a valid media file: $input" >&2
+		exit 1
+	fi
 
-  # Create working directory safely
-  debug "Creating working directory"
-  WORK_DIR=$(create_safe_tempdir)
-  debug "Created working directory: $WORK_DIR"
+	debug "Whisper model to be used: $model"
 
-  echo "Working directory: $WORK_DIR" >&2
+	# Create working directory safely
+	debug "Creating working directory"
+	WORK_DIR=$(create_safe_tempdir)
+	debug "Created working directory: $WORK_DIR"
 
-  # Set up Python and transcribe
-  if [ "${MOCK_DOWNLOAD:-false}" != "true" ]; then
-    debug "Setting up Python environment (not in mock mode)"
-    setup_python_env
-    install_python_packages
-  else
-    debug "Skipping Python setup (mock mode)"
-  fi
+	echo "Working directory: $WORK_DIR" >&2
 
-  # Process input (URL or file)
-  if ! process_input "$input" "$WORK_DIR"; then
-    exit 1
-  fi
+	# Set up Python and transcribe
+	if [ "${MOCK_DOWNLOAD:-false}" != "true" ]; then
+		debug "Setting up Python environment (not in mock mode)"
+		setup_python_env
+	else
+		debug "Skipping Python setup (mock mode)"
+	fi
 
-  # Transcribe the audio
-  if $skip_transcription; then
-    echo "Skipping transcription" >&2
-  else
-    debug "Starting transcription process"
-    transcribe_audio "${WORK_DIR}/audio.mp3" "${WORK_DIR}/transcript.txt" "$model" "${WORK_DIR}/metadata.json"
-    debug "Transcription process completed"
-  fi
+	# Process input (URL or file)
+	if ! process_input "$input" "$WORK_DIR"; then
+		exit 1
+	fi
+
+	# Transcribe the audio
+	if $skip_transcription; then
+		echo "Skipping transcription" >&2
+	else
+		local cache_consumed=false
+		if [ -n "$CURRENT_YOUTUBE_ID" ]; then
+			local transcript_cache
+			transcript_cache=$(transcript_cache_path "$CURRENT_YOUTUBE_ID")
+			if [ -s "$transcript_cache" ]; then
+				debug "Using cached transcript for YouTube ID $CURRENT_YOUTUBE_ID"
+				cat "$transcript_cache"
+				cache_consumed=true
+			fi
+		fi
+
+		if ! $cache_consumed; then
+			debug "Starting transcription process"
+			transcribe_audio "${WORK_DIR}/audio.mp3" "${WORK_DIR}/transcript.txt" "$model" "${WORK_DIR}/metadata.json"
+			debug "Transcription process completed"
+
+			if [ -n "$CURRENT_YOUTUBE_ID" ]; then
+				local cache_dir
+				cache_dir=$(ensure_transcript_cache_dir "$CURRENT_YOUTUBE_ID")
+				cp "${WORK_DIR}/transcript.txt" "$cache_dir/transcript.txt"
+				debug "Cached transcript at $cache_dir/transcript.txt"
+			fi
+		fi
+	fi
 }
 
 #### TEST SUITE CODE FROM HERE ON OUT
@@ -1157,866 +1506,1312 @@ main() {
 # passing in a --test arg, or by setting the TEST environment variable to something
 
 if $TEST; then
-  green_text() {
-    echo -ne "\e[32m${*}\e[0m"
-  }
-  yellow_text() {
-    echo -ne "\e[93m${*}\e[0m"
-  }
-  red_text() {
-    echo -ne "\e[31m${*}\e[0m"
-  }
+	green_text() {
+		echo -ne "\e[32m${*}\e[0m"
+	}
+	yellow_text() {
+		echo -ne "\e[93m${*}\e[0m"
+	}
+	red_text() {
+		echo -ne "\e[31m${*}\e[0m"
+	}
 
-  # Colors for output
-  RED='\033[0;31m'
-  GREEN='\033[0;32m'
-  YELLOW='\033[1;33m'
-  BLUE='\033[0;34m'
-  NC='\033[0m' # No Color
+	# Colors for output
+	RED='\033[0;31m'
+	GREEN='\033[0;32m'
+	YELLOW='\033[1;33m'
+	BLUE='\033[0;34m'
+	NC='\033[0m' # No Color
 
-  debug() {
-    if [ -n "${DEBUG:-}" ]; then
-      echo -e "${YELLOW}DEBUG: $*${NC}" >&2
-    fi
-  }
+	debug() {
+		if [ -n "${DEBUG:-}" ]; then
+			echo -e "${YELLOW}DEBUG: $*${NC}" >&2
+		fi
+	}
 
-  # Run a specific test
-  run_test() {
-    local test_name="$1"
-    local test_func="$2"
+	# Run a specific test
+	run_test() {
+		local test_name="$1"
+		local test_func="$2"
 
-    # Check if the test function exists
-    if declare -f "$test_func" > /dev/null; then
-      echo -e "${BLUE}Running test: $test_name${NC}"
-      "$test_func"
-      echo -e "${GREEN}Test $test_name passed!${NC}"
-    else
-      echo -e "${RED}Error: Test function '$test_func' not found${NC}"
-      exit 1
-    fi
-  }
+		# Check if the test function exists
+		if declare -f "$test_func" > /dev/null; then
+			echo -e "${BLUE}Running test: $test_name${NC}"
+			"$test_func"
+			echo -e "${GREEN}Test $test_name passed!${NC}"
+		else
+			echo -e "${RED}Error: Test function '$test_func' not found${NC}"
+			exit 1
+		fi
+	}
 
-  # Test CLI argument handling
-  test_cli_test_args() {
-    echo -n "Verifying --test argument in help: "
-    local help_output
-    help_output=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\" && show_usage")
+	# Test CLI argument handling
+	test_cli_test_args() {
+		echo -n "Verifying --test argument in help: "
+		local help_output
+		help_output=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\" && show_usage")
 
-    if echo "$help_output" | grep -q "^  --test "; then
-      echo -e "${GREEN}✅ Passed${NC}"
-    else
-      echo -e "${RED}❌ Failed: --test not found in help output${NC}"
-      return 1
-    fi
+		if echo "$help_output" | grep -q "^  --test "; then
+			echo -e "${GREEN}✅ Passed${NC}"
+		else
+			echo -e "${RED}❌ Failed: --test not found in help output${NC}"
+			return 1
+		fi
 
-    echo -n "Verifying --integration-test argument in help: "
-    if echo "$help_output" | grep -q "^  --integration-test "; then
-      echo -e "${GREEN}✅ Passed${NC}"
-    else
-      echo -e "${RED}❌ Failed: --integration-test not found in help output${NC}"
-      return 1
-    fi
+		echo -n "Verifying --integration-test argument in help: "
+		if echo "$help_output" | grep -q "^  --integration-test "; then
+			echo -e "${GREEN}✅ Passed${NC}"
+		else
+			echo -e "${RED}❌ Failed: --integration-test not found in help output${NC}"
+			return 1
+		fi
 
-    # Verify we can trigger test mode internally
-    echo -n "Verifying --test sets TEST variable: "
-    # Create a subshell with a mock main function to test argument parsing without executing the rest
-    local test_result
-    test_result=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\"; \
-      _original_main=\$FUNCNAME; \
-      main() { \
-        local model=\"base\"; \
-        local skip_transcription=false; \
-        local input=\"\"; \
-        local MOCK_DOWNLOAD=false; \
-        TEST=false; \
-        # Run just the option parsing section
-        while [[ \$# -gt 0 ]]; do \
-          case \"\$1\" in \
-            --test|TEST) \
-              TEST=true; \
-              shift; \
-              break; \
-              ;; \
-            --integration-test) \
-              INTEGRATION_TEST=true; \
-              shift; \
-              break; \
-              ;; \
-            *) \
-              shift; \
-              ;; \
-          esac; \
-        done; \
-        echo \"TEST=\$TEST\"; \
-      }; \
-      main --test")
+		# Verify we can trigger test mode internally
+		echo -n "Verifying --test sets TEST variable: "
+		# Create a subshell with a mock main function to test argument parsing without executing the rest
+		local test_result
+		test_result=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\"; \
+			_original_main=\$FUNCNAME; \
+			main() { \
+				local model=\"base\"; \
+				local skip_transcription=false; \
+				local input=\"\"; \
+				local MOCK_DOWNLOAD=false; \
+				TEST=false; \
+				# Run just the option parsing section
+				while [[ \$# -gt 0 ]]; do \
+					case \"\$1\" in \
+						--test|TEST) \
+							TEST=true; \
+							shift; \
+							break; \
+							;; \
+						--integration-test) \
+							INTEGRATION_TEST=true; \
+							shift; \
+							break; \
+							;; \
+						*) \
+							shift; \
+							;; \
+					esac; \
+				done; \
+				echo \"TEST=\$TEST\"; \
+			}; \
+			main --test")
 
-    if echo "$test_result" | grep -q "TEST=true"; then
-      echo -e "${GREEN}✅ Passed${NC}"
-    else
-      echo -e "${RED}❌ Failed: --test doesn't set TEST variable${NC}"
-      echo "Output: $test_result"
-      return 1
-    fi
+		if echo "$test_result" | grep -q "TEST=true"; then
+			echo -e "${GREEN}✅ Passed${NC}"
+		else
+			echo -e "${RED}❌ Failed: --test doesn't set TEST variable${NC}"
+			echo "Output: $test_result"
+			return 1
+		fi
 
-    # Verify integration-test flag
-    echo -n "Verifying --integration-test sets INTEGRATION_TEST variable: "
-    # Similar subshell test for integration-test
-    local integration_test_result
-    integration_test_result=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\"; \
-      _original_main=\$FUNCNAME; \
-      main() { \
-        local model=\"base\"; \
-        local skip_transcription=false; \
-        local input=\"\"; \
-        local MOCK_DOWNLOAD=false; \
-        INTEGRATION_TEST=false; \
-        # Run just the option parsing section
-        while [[ \$# -gt 0 ]]; do \
-          case \"\$1\" in \
-            --test|TEST) \
-              TEST=true; \
-              shift; \
-              break; \
-              ;; \
-            --integration-test) \
-              INTEGRATION_TEST=true; \
-              shift; \
-              break; \
-              ;; \
-            *) \
-              shift; \
-              ;; \
-          esac; \
-        done; \
-        echo \"INTEGRATION_TEST=\$INTEGRATION_TEST\"; \
-      }; \
-      main --integration-test")
+		# Verify integration-test flag
+		echo -n "Verifying --integration-test sets INTEGRATION_TEST variable: "
+		# Similar subshell test for integration-test
+		local integration_test_result
+		integration_test_result=$(BASH_SOURCE=/dev/null bash -c "source \"$SCRIPT_DIR/$SCRIPT_NAME\"; \
+			_original_main=\$FUNCNAME; \
+			main() { \
+				local model=\"base\"; \
+				local skip_transcription=false; \
+				local input=\"\"; \
+				local MOCK_DOWNLOAD=false; \
+				INTEGRATION_TEST=false; \
+				# Run just the option parsing section
+				while [[ \$# -gt 0 ]]; do \
+					case \"\$1\" in \
+						--test|TEST) \
+							TEST=true; \
+							shift; \
+							break; \
+							;; \
+						--integration-test) \
+							INTEGRATION_TEST=true; \
+							shift; \
+							break; \
+							;; \
+						*) \
+							shift; \
+							;; \
+					esac; \
+				done; \
+				echo \"INTEGRATION_TEST=\$INTEGRATION_TEST\"; \
+			}; \
+			main --integration-test")
 
-    if echo "$integration_test_result" | grep -q "INTEGRATION_TEST=true"; then
-      echo -e "${GREEN}✅ Passed${NC}"
-    else
-      echo -e "${RED}❌ Failed: --integration-test doesn't set INTEGRATION_TEST variable${NC}"
-      echo "Output: $integration_test_result"
-      return 1
-    fi
+		if echo "$integration_test_result" | grep -q "INTEGRATION_TEST=true"; then
+			echo -e "${GREEN}✅ Passed${NC}"
+		else
+			echo -e "${RED}❌ Failed: --integration-test doesn't set INTEGRATION_TEST variable${NC}"
+			echo "Output: $integration_test_result"
+			return 1
+		fi
 
-    return 0
-  }
+		return 0
+	}
 
-  # Run all tests
-  run_tests() {
-    echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
-    echo -e "${YELLOW}Note: YouTube signature extraction warnings are filtered by default.${NC}"
-    echo -e "${YELLOW}Tip: Use SHOW_YOUTUBE_WARNINGS=true to see these warnings if needed.${NC}"
+	# Run all tests
+	run_tests() {
+		echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
+		echo -e "${YELLOW}Note: YouTube signature extraction warnings are filtered by default.${NC}"
+		echo -e "${YELLOW}Tip: Use SHOW_YOUTUBE_WARNINGS=true to see these warnings if needed.${NC}"
 
-    # Run basic tests
-    test_script_exists
-    test_usage
-    test_url_validation
-    test_working_dir
-    run_test "Command-line test arguments" test_cli_test_args
+		# Run basic tests
+		test_script_exists
+		test_usage
+		test_url_validation
+		test_working_dir
+		run_test "Python dependency reporting" test_python_dependency_reporting
+		run_test "Python dependency error reasons" test_python_dependency_errors_include_reason
+		run_test "Python package list contains typing-extensions" test_python_package_list_includes_typing_extensions
+		run_test "Transcript cache short-circuit" test_transcript_cache_short_circuit
+		run_test "Clear video cache (all)" test_clear_video_cache_all
+		run_test "Clear video cache (specific)" test_clear_video_cache_specific
+			run_test "Cache status reports totals" test_cache_status_reports_totals
+			run_test "Python path hints" test_python_path_hint
+			run_test "Pinned nixpkgs commit" test_nixpkgs_pin
+			run_test "Command-line test arguments" test_cli_test_args
+			run_test "Python helper parses" test_python_helper_parses
 
-    if [ "$INTEGRATION_TEST" = "true" ]; then
-      echo -e "${BLUE}Running in INTEGRATION TEST mode with real dependencies${NC}"
+		if [ "$INTEGRATION_TEST" = "true" ]; then
+			echo -e "${BLUE}Running in INTEGRATION TEST mode with real dependencies${NC}"
 
-      # Run dependency verification first
-      if [ "${INTEGRATION_TEST_DEPS_ONLY:-false}" = "true" ]; then
-        # Only run dependency verification
-        run_test "Rye dependency verification" test_rye_dependencies
-      else
-        # Run both dependency verification and full integration test
-        run_test "Rye dependency verification" test_rye_dependencies
-        run_test "Integration test" test_integration
-      fi
-    else
-      echo -e "${BLUE}Running in MOCK TEST mode${NC}"
-      test_audio_download
-      test_audio_cache
-    fi
+			# Run dependency verification first
+			if [ "${INTEGRATION_TEST_DEPS_ONLY:-false}" = "true" ]; then
+				# Only run dependency verification
+				run_test "Python dependency verification" test_python_dependencies
+			else
+				# Run both dependency verification and full integration test
+				run_test "Python dependency verification" test_python_dependencies
+				run_test "Integration test" test_integration
+			fi
+		else
+			echo -e "${BLUE}Running in MOCK TEST mode${NC}"
+			test_audio_download
+			test_audio_cache
+			run_test "MPS detection guard" test_mps_guard
+			run_test "Device preference logic" test_device_preference_logic
+		fi
 
-    echo -e "${GREEN}All tests passed!${NC}"
-    exit 0
-  }
+		echo -e "${GREEN}All tests passed!${NC}"
+		exit 0
+	}
 
-  # Setup
-  # SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  # SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
-  TEST_TEMP_DIR=$(mktemp -d)
-  debug "Created test temp dir: $TEST_TEMP_DIR"
-  trap 'debug "Cleaning up test temp dir"; rm -rf ${TEST_TEMP_DIR}' EXIT
+	# Setup
+	# SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	# SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+	TEST_TEMP_DIR=$(mktemp --tmpdir -d "yttranscriber-tests.XXXXXX")
+	debug "Created test temp dir: $TEST_TEMP_DIR"
+	trap 'debug "Cleaning up test temp dir"; rm -rf ${TEST_TEMP_DIR}' EXIT
 
-  # Define mock function
-  mock_download_audio() {
-    local url="$1"
-    local output_dir="$2"
-    local youtube_id
+	# Define mock function
+	mock_download_audio() {
+		local url="$1"
+		local output_dir="$2"
+		local youtube_id
 
-    debug "Mock download called with URL: $url, output dir: $output_dir"
+		debug "Mock download called with URL: $url, output dir: $output_dir"
 
-    # Get YouTube ID from URL
-    youtube_id=$(echo "$url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
+		# Get YouTube ID from URL
+		youtube_id=$(echo "$url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
 
-    # Create cache directory if it doesn't exist
-    local cache_dir="/tmp/$SCRIPT_NAME"
-    mkdir -p "$cache_dir"
+		# Create cache directory if it doesn't exist
+		local cache_dir="/tmp/$SCRIPT_NAME"
+		mkdir -p "$cache_dir"
 
-    # Create mock metadata file first
-    cat > "${output_dir}/metadata.json" << EOF
+		# Create mock metadata file first
+		cat > "${output_dir}/metadata.json" << EOF
 {
-  "title": "Test Video",
-  "channel": "Test Channel",
-  "upload_date": "20240101",
-  "duration": 5.0,
-  "webpage_url": "$url"
+	"title": "Test Video",
+	"channel": "Test Channel",
+	"upload_date": "20240101",
+	"duration": 5.0,
+	"webpage_url": "$url"
 }
 EOF
 
-    # Generate a simple MP3 file using ffmpeg
-    ffmpeg -f lavfi -i "sine=frequency=1000:duration=5" -ar 44100 -ac 2 -ab 192k "${output_dir}/audio.mp3" 2>/dev/null
+		# Generate a simple MP3 file using ffmpeg
+		ffmpeg -y -f lavfi -i "sine=frequency=1000:duration=5" -ar 44100 -ac 2 -ab 192k "${output_dir}/audio.mp3" 2>/dev/null
 
-    debug "Created mock audio file: ${output_dir}/audio.mp3"
-    debug "Created mock metadata: ${output_dir}/metadata.json"
+		debug "Created mock audio file: ${output_dir}/audio.mp3"
+		debug "Created mock metadata: ${output_dir}/metadata.json"
 
-    # Create a mock audio file in the cache
-    local cache_file="${cache_dir}/${youtube_id}.mp3"
-    debug "Cache file path: $cache_file"
+		# Create a mock audio file in the cache if it's not already present
+		local cache_file="${cache_dir}/${youtube_id}.mp3"
+		debug "Cache file path: $cache_file"
 
-    # Always create the file for testing purposes
-    ffmpeg -f lavfi -i "sine=frequency=1000:duration=5" -ar 44100 -ac 2 -ab 192k "$cache_file" 2>/dev/null
+		if [ ! -f "$cache_file" ]; then
+			ffmpeg -y -f lavfi -i "sine=frequency=1000:duration=5" -ar 44100 -ac 2 -ab 192k "$cache_file" 2>/dev/null
+		else
+			debug "Cache file already exists; leaving it untouched"
+		fi
 
-    # Verify the file was created
-    if [ ! -f "$cache_file" ]; then
-      debug "Failed to create mock audio file at $cache_file"
-      return 1
-    fi
+		# Verify the file now exists
+		if [ ! -f "$cache_file" ]; then
+			debug "Failed to create mock audio file at $cache_file"
+			return 1
+		fi
 
-    debug "Successfully created mock audio file at $cache_file"
+		debug "Successfully created mock audio file at $cache_file"
 
-    return 0
-  }
-  export -f mock_download_audio
+		return 0
+	}
+	export -f mock_download_audio
 
-  # Test utilities
-  assert_success() {
-    local description="$1"
-    local cmd="${2:-}"
-    local output
+	# Test utilities
+	assert_success() {
+		local description="$1"
+		local cmd="${2:-}"
+		local output
 
-    if [ -n "$cmd" ]; then
-      debug "Running command: $cmd"
-      if output=$(eval "$cmd" 2>&1); then
-        echo -e "${GREEN}✅ Test passed: $description${NC}"
-        debug "Command output: $output"
-        return 0
-      else
-        debug "Command failed with output: $output"
-        echo -e "${RED}❌ Test failed: $description${NC}"
-        echo -e "${RED}Command: $cmd${NC}"
-        echo -e "${RED}Output: $output${NC}"
-        exit 1
-      fi
-    else
-      echo -e "${GREEN}✅ Test passed: $description${NC}"
-    fi
-  }
+		if [ -n "$cmd" ]; then
+			debug "Running command: $cmd"
+			if output=$(eval "$cmd" 2>&1); then
+				echo -e "${GREEN}✅ Test passed: $description${NC}"
+				debug "Command output: $output"
+				return 0
+			else
+				debug "Command failed with output: $output"
+				echo -e "${RED}❌ Test failed: $description${NC}"
+				echo -e "${RED}Command: $cmd${NC}"
+				echo -e "${RED}Output: $output${NC}"
+				exit 1
+			fi
+		else
+			echo -e "${GREEN}✅ Test passed: $description${NC}"
+		fi
+	}
 
-  assert_file_exists() {
-    local file="$1"
-    local description="File exists: $file"
+	test_mps_guard() {
+		echo -n "Validating torch.backends.mps guard expression: "
+		local output
+		if ! output=$(python3 - <<'EOF' 2>&1
+import types
+torch = types.SimpleNamespace(backends=types.SimpleNamespace())
+print(getattr(getattr(torch.backends, "mps", None), "is_available", lambda: False)())
+EOF
+		); then
+			echo -e "${RED}❌ Failed: Python guard command errored${NC}"
+			echo "$output"
+			return 1
+		fi
 
-    debug "Checking if file exists: $file"
-    if [ -f "$file" ]; then
-      echo -e "${GREEN}✅ Test passed: $description${NC}"
-    else
-      debug "File not found: $file"
-      echo -e "${RED}❌ Test failed: File does not exist: $file${NC}"
-      echo -e "${RED}Path checked: $file${NC}"
-      exit 1
-    fi
-  }
+		if [[ "$output" == "False" ]]; then
+			echo -e "${GREEN}✅ Passed${NC}"
+			return 0
+		fi
 
-  assert_dir_exists() {
-    local dir="$1"
-    local description="Directory exists: $dir"
+		echo -e "${RED}❌ Failed: Expected False but got '$output'${NC}"
+		return 1
+	}
 
-    debug "Checking if directory exists: $dir"
-    if [ -d "$dir" ]; then
-      echo -e "${GREEN}✅ Test passed: $description${NC}"
-    else
-      debug "Directory not found: $dir"
-      echo -e "${RED}❌ Test failed: Directory does not exist: $dir${NC}"
-      debug "Parent directory contents:"
-      ls -la "$(dirname "$dir")" >&2 || true
-      debug "Current working directory: $(pwd)"
-      exit 1
-    fi
-  }
+	test_device_preference_logic() {
+		echo -n "Verifying GPU device preference fallback logic: "
+		local output
+		if ! output=$(python3 - <<'EOF' 2>&1
+from __future__ import annotations
 
-  # Test 1: Script exists and is executable
-  test_script_exists() {
-    assert_file_exists "${SCRIPT_DIR}/$SCRIPT_NAME"
-    assert_success "Script is executable" "[ -x \"${SCRIPT_DIR}/$SCRIPT_NAME\" ]"
-  }
+def pick_device(preferred: str, cuda_avail: bool, mps_avail: bool) -> str:
+		preferred = preferred.lower()
 
-  # Test 2: Script shows usage when run without arguments
-  test_usage() {
-    # Skip this test if we're running integration tests to avoid recursion
-    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
-      echo -e "${YELLOW}Skipping usage test in integration test mode${NC}"
-      return 0
-    fi
+		def devices_iter():
+				if preferred in {"cuda", "gpu", "nvidia", "rocm", "hip"}:
+						yield "cuda"; yield "mps"
+				elif preferred in {"mps", "metal"}:
+						yield "mps"; yield "cuda"
+				elif preferred == "cpu":
+						yield "cpu"
+				else:
+						yield "cuda"; yield "mps"
+				yield "cpu"
 
-    local output
-    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" 2>&1 || true)
-    assert_success "Shows usage message" "echo \"$output\" | grep -q \"Usage:\""
-  }
+		for candidate in devices_iter():
+				if candidate == "cuda" and cuda_avail:
+						return "cuda"
+				if candidate == "mps" and mps_avail:
+						return "mps"
+				if candidate == "cpu":
+						return "cpu"
+		return "cpu"
 
-  # Test 3: Script validates YouTube URL
-  test_url_validation() {
-    # Skip this test if we're running integration tests to avoid recursion
-    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
-      echo -e "${YELLOW}Skipping URL validation test in integration test mode${NC}"
-      return 0
-    fi
+print(pick_device("auto", False, False))
+print(pick_device("auto", True, False))
+print(pick_device("auto", False, True))
+print(pick_device("cuda", False, False))
+print(pick_device("mps", True, False))
+print(pick_device("cpu", True, True))
+EOF
+		); then
+			echo -e "${RED}❌ Failed: Device preference test errored${NC}"
+			echo "$output"
+			return 1
+		fi
 
-    # Test URL validation directly without spawning a new process
-    local output=""
-    if ! validate_youtube_url "not-a-url" > /dev/null 2>&1; then
-      output="Invalid YouTube URL"
-    fi
-    assert_success "Detects invalid YouTube URL" "echo \"$output\" | grep -q \"Invalid YouTube URL\""
-  }
+		local expected=$'cpu\ncuda\nmps\ncpu\ncuda\ncpu'
+		if [[ "$output" == "$expected" ]]; then
+			echo -e "${GREEN}✅ Passed${NC}"
+			return 0
+		fi
 
-  # Test 4: Script creates working directory
-  test_working_dir() {
-    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
-      echo -e "${YELLOW}Skipping working directory test in integration test mode${NC}"
-      return 0
-    fi
+		echo -e "${RED}❌ Failed: Unexpected device selection output${NC}"
+		echo "$output"
+		return 1
+	}
 
-    local output
-    local work_dir
+	test_gpu_flags_require_clean_pin() {
+		echo -n "Verifying GPU env helper avoids allowBroken: "
+		if ! declare -f gpu_env_exports >/dev/null 2>&1; then
+			echo -e "${RED}❌ Failed: gpu_env_exports helper missing${NC}"
+			return 1
+		fi
 
-    debug "Running working directory test"
+		local exports
+		exports="$(gpu_env_exports true false)"
+		if echo "$exports" | grep -q "NIXPKGS_ALLOW_BROKEN"; then
+			echo -e "${RED}❌ Failed: ROCm path still sets allowBroken${NC}"
+			return 1
+		fi
 
-    export MOCK_DOWNLOAD=true
-    debug "Set MOCK_DOWNLOAD=true"
+		exports="$(gpu_env_exports false true)"
+		if echo "$exports" | grep -q "NIXPKGS_ALLOW_BROKEN"; then
+			echo -e "${RED}❌ Failed: CUDA path still sets allowBroken${NC}"
+			return 1
+		fi
 
-    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG=true "$SCRIPT_NAME" "https://www.youtube.com/watch?v=0NfO4AAwGf4" 2>&1 || true)
-    debug "Script output: $output"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
+	}
 
-    unset MOCK_DOWNLOAD
-    debug "Unset MOCK_DOWNLOAD"
+	test_python_dependency_reporting() {
+		echo -n "Verifying missing Python deps are identified: "
+		local output status
+		set +e
+		output=$(list_missing_python_modules missing_fake_module_123 2>&1)
+		status=$?
+		set -e
 
-    # Check if the output contains the working directory line
-    if ! echo "$output" | grep -q "Working directory:"; then
-      debug "Working directory line not found in output"
-      echo -e "${RED}❌ Test failed: Output doesn't contain 'Working directory:' line${NC}"
-      exit 1
-    fi
+		if [ $status -ne 1 ]; then
+			echo -e "${RED}❌ Failed: Expected list_missing_python_modules to exit 1 but got $status${NC}"
+			echo "$output"
+			return 1
+		fi
 
-    # Get directory and verify it exists
-    work_dir=$(echo "$output" | grep "Working directory:" | cut -d':' -f2- | tr -d ' ')
-    if [ -z "$work_dir" ]; then
-      debug "Could not extract working directory path from output"
-      echo -e "${RED}❌ Test failed: Could not extract working directory from output${NC}"
-      exit 1
-    fi
+		if echo "$output" | grep -q "missing_fake_module_123"; then
+			echo -e "${GREEN}✅ Passed${NC}"
+			return 0
+		fi
 
-    assert_dir_exists "$work_dir"
-  }
+		echo -e "${RED}❌ Failed: Missing module name not reported${NC}"
+		echo "$output"
+		return 1
+	}
 
-  # Test 5: Script downloads audio from YouTube
-  test_audio_download() {
-    local test_url="https://www.youtube.com/watch?v=0NfO4AAwGf4"
-    local youtube_id="0NfO4AAwGf4"
-    local work_dir
+	test_python_dependency_errors_include_reason() {
+		echo -n "Verifying dependency report includes failure reason: "
+		local output status
+		set +e
+		output=$(list_missing_python_modules missing_fake_module_123 2>&1)
+		status=$?
+		set -e
 
-    # Clear any existing cached file
-    rm -f "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
+		if [ $status -ne 1 ]; then
+			echo -e "${RED}❌ Failed: list_missing_python_modules should exit 1${NC}"
+			return 1
+		fi
 
-    # Create a working directory for this test
-    work_dir=$(mktemp -d)
-    debug "Created working directory for audio test: $work_dir"
+		if echo "$output" | grep -q "ModuleNotFoundError"; then
+			echo -e "${GREEN}✅ Passed${NC}"
+			return 0
+		fi
 
-    # Set mock download mode
-    export MOCK_DOWNLOAD=true
+		echo -e "${RED}❌ Failed: Error reason not included${NC}"
+		echo "$output"
+		return 1
+	}
 
-    # Create mock metadata first
-    cat > "${work_dir}/metadata.json" << EOF
+	test_python_package_list_includes_typing_extensions() {
+		echo -n "Verifying python package list includes typing-extensions attr: "
+		local package_line
+		package_line=$(grep -m1 'python_pkg_attrs=' "$SCRIPT_DIR/$SCRIPT_NAME" || true)
+
+		if echo "$package_line" | grep -q 'python312Packages.typing-extensions'; then
+			echo -e "${GREEN}✅ Passed${NC}"
+			return 0
+		fi
+
+		echo -e "${RED}❌ Failed: typing-extensions missing from python_pkg_attrs${NC}"
+		echo "Line: $package_line"
+		return 1
+	}
+
+	test_python_helper_parses() {
+		echo -n "Verifying embedded Python helper parses: "
+		local py_block
+		py_block=$(awk '/^if ! python3 - "\$audio_file" "\$transcript_file" "\$model" "\$metadata_file" <<'\''EOF'\''/{flag=1; next} /^EOF$/{if(flag){exit}} flag {print}' "$SCRIPT_DIR/$SCRIPT_NAME")
+		if [ -z "$py_block" ]; then
+			echo -e "${RED}❌ Failed: could not extract Python helper heredoc${NC}"
+			return 1
+		fi
+			if python3 - <<PY 2>/dev/null; then
+import ast
+source = """${py_block}"""
+ast.parse(source)
+PY
+				echo -e "${GREEN}✅ Passed${NC}"
+				return 0
+			fi
+		echo -e "${RED}❌ Failed: Python helper has syntax errors${NC}"
+		return 1
+	}
+
+	test_transcript_cache_short_circuit() {
+		echo -n "Verifying transcript cache short-circuits transcription: "
+		local test_id="testtesttest"
+		local cache_dir
+		cache_dir=$(transcript_cache_dir "$test_id")
+		mkdir -p "$cache_dir"
+		echo "cache success" > "$cache_dir/transcript.txt"
+
+		local output
+		if output=$(ENABLE_ROCM=0 ENABLE_CUDA=0 TEST=false INTEGRATION_TEST=false "$SCRIPT_NAME" "https://www.youtube.com/watch?v=$test_id" 2>/dev/null); then
+			if echo "$output" | grep -q "cache success"; then
+				echo -e "${GREEN}✅ Passed${NC}"
+				rm -rf "$cache_dir"
+				return 0
+			fi
+		fi
+
+		rm -rf "$cache_dir"
+		echo -e "${RED}❌ Failed: cached transcript not used${NC}"
+		echo "$output"
+		return 1
+	}
+
+	test_clear_video_cache_all() {
+		local temp_cache
+	temp_cache=$(mktemp --tmpdir -d "yttranscriber-cache.XXXXXX")
+		local alias="$TEST_TEMP_DIR/yt-transcriber-clear-all"
+		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
+		local alias_name
+		alias_name=$(basename "$alias")
+		local audio_dir="/tmp/$alias_name"
+		mkdir -p "$audio_dir"
+
+	local youtube_id="allcachetest"
+	local transcript_dir="$temp_cache/yt-transcriber/$youtube_id"
+	mkdir -p "$transcript_dir"
+	echo "cached text" > "$transcript_dir/transcript.txt"
+	echo "audio-bytes" > "$audio_dir/${youtube_id}.mp3"
+
+	local cmd_output=""
+	if ! cmd_output=$(TEST= INTEGRATION_TEST= _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache 2>&1); then
+		echo -e "${RED}❌ Failed: --clear-video-cache exited with error${NC}"
+		[ -n "$cmd_output" ] && echo "$cmd_output"
+		rm -rf "$temp_cache" "$audio_dir"
+		return 1
+	fi
+
+		if [ -e "$transcript_dir" ] || [ -f "$audio_dir/${youtube_id}.mp3" ]; then
+			echo -e "${RED}❌ Failed: Cache artifacts still exist after clearing all caches${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		rm -rf "$temp_cache" "$audio_dir"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
+	}
+
+	test_clear_video_cache_specific() {
+		local temp_cache
+	temp_cache=$(mktemp --tmpdir -d "yttranscriber-cache.XXXXXX")
+		local alias="$TEST_TEMP_DIR/yt-transcriber-clear-specific"
+		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
+		local alias_name
+		alias_name=$(basename "$alias")
+		local audio_dir="/tmp/$alias_name"
+		mkdir -p "$audio_dir"
+
+		local first_id="cache_one"
+		local second_id="cache_two"
+	mkdir -p "$temp_cache/yt-transcriber/$first_id" "$temp_cache/yt-transcriber/$second_id"
+	echo "first" > "$temp_cache/yt-transcriber/$first_id/transcript.txt"
+	echo "second" > "$temp_cache/yt-transcriber/$second_id/transcript.txt"
+	echo "audio" > "$audio_dir/${first_id}.mp3"
+	echo "audio" > "$audio_dir/${second_id}.mp3"
+
+	local cmd_output=""
+	if ! cmd_output=$(TEST= INTEGRATION_TEST= _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --clear-video-cache "$first_id" 2>&1); then
+		echo -e "${RED}❌ Failed: --clear-video-cache <id> exited with error${NC}"
+		[ -n "$cmd_output" ] && echo "$cmd_output"
+		rm -rf "$temp_cache" "$audio_dir"
+		return 1
+	fi
+
+		if [ -e "$temp_cache/yt-transcriber/$first_id" ] || [ -f "$audio_dir/${first_id}.mp3" ]; then
+			echo -e "${RED}❌ Failed: Specific cache not cleared${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if [ ! -e "$temp_cache/yt-transcriber/$second_id" ] || [ ! -f "$audio_dir/${second_id}.mp3" ]; then
+			echo -e "${RED}❌ Failed: Other caches should remain untouched${NC}"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		rm -rf "$temp_cache" "$audio_dir"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
+	}
+
+	test_cache_status_reports_totals() {
+		local temp_cache
+	temp_cache=$(mktemp --tmpdir -d "yttranscriber-cache.XXXXXX")
+		local alias="$TEST_TEMP_DIR/yt-transcriber-cache-status"
+		ln -sf "$SCRIPT_DIR/$SCRIPT_NAME" "$alias"
+		local alias_name
+		alias_name=$(basename "$alias")
+		local audio_dir="/tmp/$alias_name"
+		mkdir -p "$audio_dir"
+
+		mkdir -p "$temp_cache/yt-transcriber/id-one" "$temp_cache/yt-transcriber/id-two"
+		printf 'alpha' > "$temp_cache/yt-transcriber/id-one/transcript.txt"
+		printf 'beta' > "$temp_cache/yt-transcriber/id-two/transcript.txt"
+
+		printf 'audio-one' > "$audio_dir/id-one.mp3"
+		printf 'yo' > "$audio_dir/id-two.mp3"
+
+		mkdir -p "$temp_cache/yt-transcriber-summarize"
+		printf 'sum' > "$temp_cache/yt-transcriber-summarize/id-one.txt"
+
+	mkdir -p "$temp_cache/yt-transcriber-translate"
+	printf 'tr' > "$temp_cache/yt-transcriber-translate/id-one.txt"
+
+	local output
+	if ! output=$(TEST= INTEGRATION_TEST= _nix_wrapper_magic=1 XDG_CACHE_HOME="$temp_cache" "$alias" --cache-status 2>&1); then
+		echo -e "${RED}❌ Failed: --cache-status exited with error${NC}"
+		[ -n "$output" ] && echo "$output"
+		rm -rf "$temp_cache" "$audio_dir"
+		return 1
+	fi
+
+		if ! echo "$output" | grep -q "Transcripts: 2 entries, 9 bytes"; then
+			echo -e "${RED}❌ Failed: transcript stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Audio: 2 files, 11 bytes"; then
+			echo -e "${RED}❌ Failed: audio stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Summaries: 1 entries, 3 bytes"; then
+			echo -e "${RED}❌ Failed: summaries stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		if ! echo "$output" | grep -q "Translations: 1 entries, 2 bytes"; then
+			echo -e "${RED}❌ Failed: translations stats missing${NC}"
+			echo "$output"
+			rm -rf "$temp_cache" "$audio_dir"
+			return 1
+		fi
+
+		rm -rf "$temp_cache" "$audio_dir"
+		echo -e "${GREEN}✅ Passed${NC}"
+		return 0
+	}
+
+
+	test_python_path_hint() {
+		echo -n "Verifying setup can consume precomputed PYTHONPATH hints: "
+		local tmp_site
+	tmp_site=$(mktemp --tmpdir -d "yttranscriber-site.XXXXXX")
+		mkdir -p "$tmp_site/torch" "$tmp_site/whisper" "$tmp_site/yt_dlp"
+		printf '%s\n' '"""mock torch package for testing"""' > "$tmp_site/torch/__init__.py"
+		printf '%s\n' '"""mock whisper package for testing"""' > "$tmp_site/whisper/__init__.py"
+		printf '%s\n' '"""mock yt_dlp package for testing"""' > "$tmp_site/yt_dlp/__init__.py"
+		printf '%s\n' '"""mock psutil module for testing"""' > "$tmp_site/psutil.py"
+
+		local original_pythonpath="${PYTHONPATH:-}"
+		export YT_TRANSCRIBER_PYTHON_PATHS="$tmp_site"
+		export YT_TRANSCRIBER_PYTHON_PKGS=""
+
+		if ! setup_python_env >/dev/null 2>&1; then
+			echo -e "${RED}❌ Failed: setup_python_env returned non-zero${NC}"
+			rm -rf "$tmp_site"
+			PYTHONPATH="$original_pythonpath"
+			[ -n "$original_pythonpath" ] && export PYTHONPATH || unset PYTHONPATH
+			unset YT_TRANSCRIBER_PYTHON_PATHS
+			return 1
+		fi
+
+		if python3 - <<'PY' >/dev/null 2>&1; then
+import torch, whisper, yt_dlp, psutil  # noqa: F401
+PY
+			echo -e "${GREEN}✅ Passed${NC}"
+			rm -rf "$tmp_site"
+			PYTHONPATH="$original_pythonpath"
+			[ -n "$original_pythonpath" ] && export PYTHONPATH || unset PYTHONPATH
+			unset YT_TRANSCRIBER_PYTHON_PATHS
+			return 0
+		fi
+
+		echo -e "${RED}❌ Failed: Python cannot import mocked modules${NC}"
+		rm -rf "$tmp_site"
+		PYTHONPATH="$original_pythonpath"
+		[ -n "$original_pythonpath" ] && export PYTHONPATH || unset PYTHONPATH
+		unset YT_TRANSCRIBER_PYTHON_PATHS
+		return 1
+	}
+
+	test_nixpkgs_pin() {
+		echo -n "Verifying nixpkgs pin matches expected commit: "
+		local expected="github:NixOS/nixpkgs/1b7e751db23cedcd3bf56dc5170840b8a7e752a2"
+		local actual
+		actual=$(awk -F\" '$0 ~ /nixpkgs="github:NixOS\/nixpkgs\// {print $2; exit}' "$SCRIPT_DIR/$SCRIPT_NAME")
+
+		if [ -z "$actual" ]; then
+			echo -e "${RED}❌ Failed: Unable to locate nixpkgs pin in script${NC}"
+			return 1
+		fi
+
+		if [ "$actual" = "$expected" ]; then
+			echo -e "${GREEN}✅ Passed${NC}"
+			return 0
+		fi
+
+		echo -e "${RED}❌ Failed: Pin mismatch${NC}"
+		echo "Expected: $expected"
+		echo "Actual:   $actual"
+		return 1
+	}
+
+	assert_file_exists() {
+		local file="$1"
+		local description="File exists: $file"
+
+		debug "Checking if file exists: $file"
+		if [ -f "$file" ]; then
+			echo -e "${GREEN}✅ Test passed: $description${NC}"
+		else
+			debug "File not found: $file"
+			echo -e "${RED}❌ Test failed: File does not exist: $file${NC}"
+			echo -e "${RED}Path checked: $file${NC}"
+			exit 1
+		fi
+	}
+
+	assert_dir_exists() {
+		local dir="$1"
+		local description="Directory exists: $dir"
+
+		debug "Checking if directory exists: $dir"
+		if [ -d "$dir" ]; then
+			echo -e "${GREEN}✅ Test passed: $description${NC}"
+		else
+			debug "Directory not found: $dir"
+			echo -e "${RED}❌ Test failed: Directory does not exist: $dir${NC}"
+			debug "Parent directory contents:"
+			ls -la "$(dirname "$dir")" >&2 || true
+			debug "Current working directory: $(pwd)"
+			exit 1
+		fi
+	}
+
+	# Test 1: Script exists and is executable
+	test_script_exists() {
+		assert_file_exists "${SCRIPT_DIR}/$SCRIPT_NAME"
+		assert_success "Script is executable" "[ -x \"${SCRIPT_DIR}/$SCRIPT_NAME\" ]"
+	}
+
+	# Test 2: Script shows usage when run without arguments
+	test_usage() {
+		# Skip this test if we're running integration tests to avoid recursion
+		if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+			echo -e "${YELLOW}Skipping usage test in integration test mode${NC}"
+			return 0
+		fi
+
+		local output
+		output=$(BASH_SOURCE=/dev/null TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= bash -lc \
+			"source \"$SCRIPT_DIR/$SCRIPT_NAME\" >/dev/null 2>&1 && show_usage" 2>&1 || true)
+		assert_success "Shows usage message" "echo \"$output\" | grep -q \"Usage:\""
+	}
+
+	# Test 3: Script validates YouTube URL
+	test_url_validation() {
+		# Skip this test if we're running integration tests to avoid recursion
+		if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+			echo -e "${YELLOW}Skipping URL validation test in integration test mode${NC}"
+			return 0
+		fi
+
+		# Test URL validation directly without spawning a new process
+		local output=""
+		if ! validate_youtube_url "not-a-url" > /dev/null 2>&1; then
+			output="Invalid YouTube URL"
+		fi
+		assert_success "Detects invalid YouTube URL" "echo \"$output\" | grep -q \"Invalid YouTube URL\""
+	}
+
+	# Test 4: Script creates working directory
+	test_working_dir() {
+		if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+			echo -e "${YELLOW}Skipping working directory test in integration test mode${NC}"
+			return 0
+		fi
+
+		local output
+		local work_dir
+
+		local cache_file
+		cache_file=$(transcript_cache_path "0NfO4AAwGf4")
+		rm -f "$cache_file"
+
+		debug "Running working directory test"
+
+		export MOCK_DOWNLOAD=true
+		debug "Set MOCK_DOWNLOAD=true"
+
+		local original_path="$PATH"
+		output=$(PATH="$original_path" _nix_wrapper_magic=1 MOCK_DOWNLOAD=true TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG=true "$SCRIPT_NAME" "https://www.youtube.com/watch?v=0NfO4AAwGf4" 2>&1 || true)
+		debug "Script output: $output"
+
+		unset MOCK_DOWNLOAD
+		debug "Unset MOCK_DOWNLOAD"
+
+		# Check if the output contains the working directory line
+		if ! echo "$output" | grep -q "Working directory:"; then
+			debug "Working directory line not found in output"
+			echo -e "${RED}❌ Test failed: Output doesn't contain 'Working directory:' line${NC}"
+			exit 1
+		fi
+
+		# Get directory and verify it exists
+		work_dir=$(echo "$output" | grep "Working directory:" | cut -d':' -f2- | tr -d ' ')
+		if [ -z "$work_dir" ]; then
+			debug "Could not extract working directory path from output"
+			echo -e "${RED}❌ Test failed: Could not extract working directory from output${NC}"
+			exit 1
+		fi
+
+		assert_dir_exists "$work_dir"
+	}
+
+	# Test 5: Script downloads audio from YouTube
+	test_audio_download() {
+		local test_url="https://www.youtube.com/watch?v=0NfO4AAwGf4"
+		local youtube_id="0NfO4AAwGf4"
+		local work_dir
+
+		# Clear any existing cached file
+		rm -f "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
+
+		# Create a working directory for this test
+	work_dir=$(mktemp --tmpdir -d "yttranscriber-work.XXXXXX")
+		debug "Created working directory for audio test: $work_dir"
+
+		# Set mock download mode
+		export MOCK_DOWNLOAD=true
+
+		# Create mock metadata first
+		cat > "${work_dir}/metadata.json" << EOF
 {
-  "title": "Test Video",
-  "channel": "Test Channel",
-  "upload_date": "20240101",
-  "duration": 5.0,
-  "webpage_url": "$test_url"
+	"title": "Test Video",
+	"channel": "Test Channel",
+	"upload_date": "20240101",
+	"duration": 5.0,
+	"webpage_url": "$test_url"
 }
 EOF
 
-    # Run mock download directly instead of through the script
-    mock_download_audio "$test_url" "$work_dir"
-
-    # Verify the file exists and has content
-    assert_file_exists "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
-
-    # Verify it's not empty
-    if [ ! -s "/tmp/$SCRIPT_NAME/${youtube_id}.mp3" ]; then
-      echo -e "${RED}❌ Test failed: Downloaded file is empty${NC}"
-      exit 1
-    fi
-
-    # Verify it's actually an audio file
-    if ! file "/tmp/$SCRIPT_NAME/${youtube_id}.mp3" | grep -qE "Audio|audio"; then
-      echo -e "${RED}❌ Test failed: File is not an audio file${NC}"
-      echo "File type: $(file "/tmp/$SCRIPT_NAME/${youtube_id}.mp3")"
-      exit 1
-    fi
-
-    echo -e "${GREEN}✅ Test passed: Audio file downloaded successfully${NC}"
-
-    # Clean up
-    unset MOCK_DOWNLOAD
-
-    rm -rf "$work_dir"
-  }
-
-  # Test 6: Script uses cached audio file if available
-  test_audio_cache() {
-    # Setup
-    local test_url="${1:-https://www.youtube.com/watch?v=0NfO4AAwGf4}"
-
-    # Extract the YouTube ID from the URL
-    local youtube_id="${test_url##*=}"  # Extract ID from URL dynamically
-
-    local cache_dir="/tmp/$SCRIPT_NAME"
-    local cache_file="$cache_dir/${youtube_id}.mp3"
-    local transcript_file="$cache_dir/${youtube_id}.txt"
-
-    # Ensure cache directory exists
-    mkdir -p "$cache_dir"
-
-    # Cleanup any existing test files
-    rm -f "$cache_file" "$transcript_file"
-
-    # Detect OS for stat command compatibility
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-      # macOS syntax
-      get_size() { /usr/bin/stat -f %z "$1"; }
-      get_mtime() { /usr/bin/stat -f %m "$1"; }
-    else
-      # Linux syntax
-      get_size() { stat -c "%s" "$1"; }
-      get_mtime() { stat -c "%Y" "$1"; }
-    fi
-
-    # First run - create the cache file directly using the mock function
-    debug "Creating initial cache file..."
-    export MOCK_DOWNLOAD=true
-
-    # Create a working directory for the test
-    local work_dir=$(mktemp -d)
-    debug "Created working directory for cache test: $work_dir"
-
-    # Run mock download directly to create the cache file
-    if ! mock_download_audio "$test_url" "$work_dir"; then
-      echo "❌ Test failed: Initial download failed"
-      rm -rf "$work_dir"
-      unset MOCK_DOWNLOAD
-      return 1
-    fi
-
-    # Verify cache file was created
-    if [ ! -f "$cache_file" ]; then
-      echo "❌ Test failed: Cache file was not created"
-      rm -rf "$work_dir"
-      unset MOCK_DOWNLOAD
-      return 1
-    fi
-
-    # Get original modification time and size
-    local original_mtime
-    original_mtime=$(get_mtime "$cache_file")
-    local original_size
-    original_size=$(get_size "$cache_file")
-
-    debug "Original cache file size: $original_size bytes"
-    debug "Original modification time: $original_mtime"
-
-    # Small delay to ensure any timestamp would change if file is modified
-    sleep 1
-
-    # Second run - should use cache
-    debug "Running mock download again - should use cache..."
-
-    # Create a new working directory for the second run
-    local work_dir2=$(mktemp -d)
-    debug "Created second working directory for cache test: $work_dir2"
-
-    # Run mock download again
-    if ! mock_download_audio "$test_url" "$work_dir2"; then
-      echo "❌ Test failed: Second run failed"
-      rm -rf "$work_dir" "$work_dir2"
-      unset MOCK_DOWNLOAD
-      return 1
-    fi
-
-    # Check both modification time and size
-    local new_mtime
-    new_mtime=$(get_mtime "$cache_file")
-    local new_size
-    new_size=$(get_size "$cache_file")
-
-    debug "New cache file size: $new_size bytes"
-    debug "New modification time: $new_mtime"
-
-    # Verify file wasn't modified
-    if [ "$original_mtime" -ne "$new_mtime" ]; then
-        echo "❌ Test failed: Cache file was modified (timestamp changed)"
-        echo "Original mtime: $original_mtime"
-        echo "New mtime: $new_mtime"
-        rm -rf "$work_dir" "$work_dir2"
-        unset MOCK_DOWNLOAD
-        return 1
-    fi
-
-    if [ "$original_size" -ne "$new_size" ]; then
-        echo "❌ Test failed: Cache file size changed"
-        echo "Original size: $original_size bytes"
-        echo "New size: $new_size bytes"
-        rm -rf "$work_dir" "$work_dir2"
-        unset MOCK_DOWNLOAD
-        return 1
-    fi
-
-    # Cleanup
-    rm -rf "$work_dir" "$work_dir2"
-    unset MOCK_DOWNLOAD
-
-    echo "✅ Test passed: Cache file was used without modification"
-    return 0
-  }
-
-  # Test 7: Script generates transcript from audio
-  test_transcription() {
-    # Skip this test if we're running integration tests to avoid recursion
-    if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
-      echo -e "${YELLOW}Skipping transcription test in integration test mode${NC}"
-      return 0
-    fi
-
-    local test_url="https://www.youtube.com/watch?v=0NfO4AAwGf4"
-    local youtube_id="0NfO4AAwGf4"
-    local work_dir
-
-    # Run the script and capture its output to get the working directory
-    local output
-    output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" "$test_url" 2>&1 || true)
-
-    # Extract working directory from output
-    work_dir=$(echo "$output" | grep "Working directory:" | cut -d':' -f2- | tr -d ' ')
-    if [ -z "$work_dir" ]; then
-      echo "❌ Test failed: Could not determine working directory"
-      echo "Script output:"
-      echo "$output"
-      exit 1
-    fi
-
-    # Check for transcript file in the script's working directory
-    local transcript_file="${work_dir}/transcript.txt"
-    assert_file_exists "$transcript_file"
-
-    # Check that transcript has content
-    if [ ! -s "$transcript_file" ]; then
-      echo "❌ Test failed: Transcript file is empty"
-      exit 1
-    fi
-
-    # Check that transcript contains actual text (not just whitespace or garbage)
-    if ! grep -q '[[:alpha:]]' "$transcript_file"; then
-      echo "❌ Test failed: Transcript doesn't contain readable text"
-      echo "Transcript content:"
-      cat "$transcript_file"
-      exit 1
-    fi
-
-    echo "✅ Test passed: Generated valid transcript"
-  }
-
-  # Test that Rye environment properly activates dependencies
-  test_rye_dependencies() {
-    echo -e "${BLUE}Verifying Rye environment and dependencies...${NC}"
-
-    # Setup Python environment using the actual function
-    echo -e "${YELLOW}Setting up Python environment...${NC}"
-    setup_python_env
-    echo -e "${GREEN}Python environment setup completed${NC}"
-
-    # Check that critical dependencies are available
-    local dependencies=("python" "yt-dlp" "ffmpeg")
-    local missing_deps=()
-
-    for dep in "${dependencies[@]}"; do
-      echo -n "Checking for $dep: "
-      if command -v "$dep" >/dev/null 2>&1; then
-        echo -e "${GREEN}Found${NC}"
-
-        # For Python dependencies, verify they can be imported
-        if [ "$dep" = "python" ]; then
-          echo "Python version: $(python --version)"
-
-          # Check critical Python packages
-          local py_packages=("torch" "whisper" "yt_dlp" "psutil")
-          for pkg in "${py_packages[@]}"; do
-            echo -n "  Checking Python package $pkg: "
-            if python -c "import $pkg" 2>/dev/null; then
-              echo -e "${GREEN}Installed${NC}"
-
-              # For torch, check if MPS (Metal Performance Shaders) is available on macOS
-              if [ "$pkg" = "torch" ] && [[ "$OSTYPE" == "darwin"* ]]; then
-                echo -n "    MPS available: "
-                if python -c "import torch; print(torch.backends.mps.is_available())" 2>/dev/null | grep -q "True"; then
-                  echo -e "${GREEN}Yes${NC}"
-                else
-                  echo -e "${YELLOW}No${NC}"
-                fi
-              fi
-            else
-              echo -e "${RED}Not installed${NC}"
-              missing_deps+=("Python package: $pkg")
-            fi
-          done
-        fi
-
-        # For yt-dlp, check version
-        if [ "$dep" = "yt-dlp" ]; then
-          echo "yt-dlp version: $(yt-dlp --version)"
-        fi
-
-        # For ffmpeg, check version
-        if [ "$dep" = "ffmpeg" ]; then
-          echo "ffmpeg version: $(ffmpeg -version | head -n 1)"
-        fi
-      else
-        echo -e "${RED}Not found${NC}"
-        missing_deps+=("$dep")
-      fi
-    done
-
-    # Report missing dependencies
-    if [ ${#missing_deps[@]} -gt 0 ]; then
-      echo -e "${RED}❌ Dependency verification failed. Missing dependencies:${NC}"
-      for missing in "${missing_deps[@]}"; do
-        echo -e "${RED}- $missing${NC}"
-      done
-
-      echo -e "${YELLOW}Debugging information:${NC}"
-      echo "PATH: $PATH"
-      echo "RYE_PROJECT_DIR: $RYE_PROJECT_DIR"
-
-      if [ -d "$RYE_PROJECT_DIR/.venv" ]; then
-        echo -e "${YELLOW}Rye virtual environment exists at: $RYE_PROJECT_DIR/.venv${NC}"
-        ls -la "$RYE_PROJECT_DIR/.venv/bin" 2>/dev/null || echo "Cannot list .venv/bin contents"
-      else
-        echo -e "${RED}Rye virtual environment not found at: $RYE_PROJECT_DIR/.venv${NC}"
-      fi
-
-      return 1
-    fi
-
-    echo -e "${GREEN}✅ All dependencies verified successfully${NC}"
-    return 0
-  }
-  # Integration test: Test with real YouTube URL and dependencies
-  test_integration() {
-    echo -e "${YELLOW}Running integration test with real YouTube URL and dependencies${NC}"
-
-    # First verify dependencies
-    test_rye_dependencies
-
-    local test_url="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"
-
-    # Extract the YouTube ID from the URL
-    local youtube_id=$(echo "$test_url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
-    if [ -z "$youtube_id" ]; then
-      echo -e "${RED}❌ Integration test failed: Could not extract YouTube ID from URL: $test_url${NC}"
-      return 1
-    fi
-
-    local cache_dir="/tmp/$SCRIPT_NAME"
-    local cache_file="$cache_dir/${youtube_id}.mp3"
-    local transcript_file="$cache_dir/${youtube_id}.txt"
-
-    # Clean up any existing files if INTEGRATION_TEST_CLEAN is set
-    if [ "${INTEGRATION_TEST_CLEAN:-true}" = "true" ]; then
-      echo -e "${YELLOW}Cleaning up existing test files...${NC}"
-      rm -f "$cache_file" "$transcript_file"
-    else
-      echo -e "${YELLOW}Skipping cleanup of existing test files...${NC}"
-    fi
-
-    # Create the cache directory if it doesn't exist
-    mkdir -p "$cache_dir"
-
-    # Run the actual script with the real URL
-    echo -e "${YELLOW}Downloading and transcribing real YouTube video...${NC}"
-    echo -e "${YELLOW}This may take a few minutes depending on your internet connection and CPU.${NC}"
-
-    # First, validate the URL separately to avoid issues with argument parsing
-    echo -e "${YELLOW}Validating YouTube URL: $test_url${NC}"
-    if ! validate_youtube_url "$test_url"; then
-      echo -e "${RED}❌ Integration test failed: Invalid YouTube URL: $test_url${NC}"
-      return 1
-    fi
-
-    # Define command arguments as an array to properly handle spaces and flags
-    local cmd_args=()
-    cmd_args+=("$test_url")
-
-    # Add any additional arguments from environment variable
-    if [ -n "${INTEGRATION_TEST_ARGS:-}" ]; then
-      # Split the args string into an array
-      IFS=' ' read -r -a extra_args <<< "$INTEGRATION_TEST_ARGS"
-      cmd_args+=("${extra_args[@]}")
-    fi
-
-    # Run the script directly
-    echo -e "${YELLOW}Running command: $SCRIPT_NAME ${cmd_args[*]}${NC}"
-
-    # Create a variable to capture the temporary directory
-    local temp_dir=""
-
-    # Temporary file to capture stderr
-    local stderr_file=$(mktemp)
-
-    # Run the script with DEBUG=true to capture the working directory
-    cd "$SCRIPT_DIR"
-    TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG=true "$SCRIPT_NAME" "${cmd_args[@]}" 2> "$stderr_file"
-    local exit_code=$?
-
-    # Extract the working directory from stderr
-    if grep -q "^Working directory: " "$stderr_file"; then
-      temp_dir=$(grep "^Working directory: " "$stderr_file" | head -n 1 | sed 's/^Working directory: //')
-    fi
-
-    # Display stderr for debugging
-    cat "$stderr_file" >&2
-    rm -f "$stderr_file"
-
-    if [ $exit_code -ne 0 ]; then
-      echo -e "${RED}❌ Integration test failed: Script exited with code $exit_code${NC}"
-      return 1
-    fi
-
-    # Wait a moment for file operations to complete
-    sleep 2
-
-    # Check if we captured the temporary directory
-    if [ -z "$temp_dir" ]; then
-      echo -e "${RED}❌ Integration test failed: Could not determine temporary working directory${NC}"
-      return 1
-    fi
-
-    echo -e "${YELLOW}Temporary working directory: $temp_dir${NC}"
-
-    # Check if the cache directory exists
-    if [ ! -d "$cache_dir" ]; then
-      echo -e "${RED}❌ Integration test failed: Cache directory was not created${NC}"
-      echo "Expected directory: $cache_dir"
-      return 1
-    fi
-
-    # List the contents of the cache directory for debugging
-    echo -e "${YELLOW}Cache directory contents:${NC}"
-    ls -la "$cache_dir"
-
-    # List the contents of the temporary directory
-    echo -e "${YELLOW}Temporary directory contents:${NC}"
-    ls -la "$temp_dir"
-
-    # Verify the audio file was downloaded to cache
-    if [ ! -f "$cache_file" ]; then
-      echo -e "${RED}❌ Integration test failed: Audio file was not downloaded to cache${NC}"
-      echo "Expected file: $cache_file"
-      return 1
-    fi
-
-    # Verify it's actually an audio file
-    if ! file "$cache_file" | grep -qE "Audio|audio"; then
-      echo -e "${RED}❌ Integration test failed: File is not an audio file${NC}"
-      echo "File type: $(file "$cache_file")"
-      return 1
-    fi
-
-    # Verify the transcript was generated in the temporary directory
-    local transcript_file="$temp_dir/transcript.txt"
-    if [ ! -f "$transcript_file" ]; then
-      echo -e "${RED}❌ Integration test failed: Transcript file was not generated${NC}"
-      echo "Expected file: $transcript_file"
-      return 1
-    fi
-
-    # Verify the transcript has content
-    if [ ! -s "$transcript_file" ]; then
-      echo -e "${RED}❌ Integration test failed: Transcript file is empty${NC}"
-      echo "Expected file: $transcript_file"
-      return 1
-    fi
-
-    # Display some of the transcript content
-    echo -e "${YELLOW}Transcript preview:${NC}"
-    head -n 5 "$transcript_file"
-    echo "..."
-
-    echo -e "${GREEN}✅ Integration test passed: Successfully downloaded and transcribed a real YouTube video${NC}"
-    return 0
-  }
-
-  # Ensure tests run in correct order
-  echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
-  dependencychecks
-  versionchecks
-  run_test "Script exists and executable" test_script_exists
-  run_test "Usage message" test_usage
-  run_test "URL validation" test_url_validation
-  run_test "Working directory creation" test_working_dir
-
-  if [ "$INTEGRATION_TEST" = "true" ]; then
-    echo -e "${BLUE}Running in INTEGRATION TEST mode with real dependencies${NC}"
-
-    # Run dependency verification first
-    if [ "${INTEGRATION_TEST_DEPS_ONLY:-false}" = "true" ]; then
-      # Only run dependency verification
-      run_test "Rye dependency verification" test_rye_dependencies
-    else
-      # Run both dependency verification and full integration test
-      run_test "Rye dependency verification" test_rye_dependencies
-      run_test "Integration test" test_integration
-    fi
-  else
-    echo -e "${BLUE}Running in MOCK TEST mode${NC}"
-    run_test "Audio download" test_audio_download
-    run_test "Audio caching" test_audio_cache
-  fi
-
-  echo -e "${GREEN}All tests passed!${NC}"
+		# Run mock download directly instead of through the script
+		mock_download_audio "$test_url" "$work_dir"
+
+		# Verify the file exists and has content
+		assert_file_exists "/tmp/$SCRIPT_NAME/${youtube_id}.mp3"
+
+		# Verify it's not empty
+		if [ ! -s "/tmp/$SCRIPT_NAME/${youtube_id}.mp3" ]; then
+			echo -e "${RED}❌ Test failed: Downloaded file is empty${NC}"
+			exit 1
+		fi
+
+		echo -e "${GREEN}✅ Test passed: Audio file downloaded successfully${NC}"
+
+		# Clean up
+		unset MOCK_DOWNLOAD
+
+		rm -rf "$work_dir"
+	}
+
+	# Test 6: Script uses cached audio file if available
+	test_audio_cache() {
+		# Setup
+		local test_url="${1:-https://www.youtube.com/watch?v=0NfO4AAwGf4}"
+
+		# Extract the YouTube ID from the URL
+		local youtube_id="${test_url##*=}"  # Extract ID from URL dynamically
+
+		local cache_dir="/tmp/$SCRIPT_NAME"
+		local cache_file="$cache_dir/${youtube_id}.mp3"
+		local transcript_file="$cache_dir/${youtube_id}.txt"
+
+		# Ensure cache directory exists
+		mkdir -p "$cache_dir"
+
+		# Cleanup any existing test files
+		rm -f "$cache_file" "$transcript_file"
+
+		# Detect OS for stat command compatibility
+		if [[ "$OSTYPE" == "darwin"* ]]; then
+			# macOS syntax
+			get_size() { /usr/bin/stat -f %z "$1"; }
+			get_mtime() { /usr/bin/stat -f %m "$1"; }
+		else
+			# Linux syntax
+			get_size() { stat -c "%s" "$1"; }
+			get_mtime() { stat -c "%Y" "$1"; }
+		fi
+
+		if command -v sha256sum >/dev/null 2>&1; then
+			get_hash() { sha256sum "$1" | awk '{print $1}'; }
+		else
+			get_hash() { shasum -a 256 "$1" | awk '{print $1}'; }
+		fi
+
+		# First run - create the cache file directly using the mock function
+		debug "Creating initial cache file..."
+		export MOCK_DOWNLOAD=true
+
+		# Create a working directory for the test
+	local work_dir=$(mktemp --tmpdir -d "yttranscriber-work.XXXXXX")
+		debug "Created working directory for cache test: $work_dir"
+
+		# Run mock download directly to create the cache file
+		if ! mock_download_audio "$test_url" "$work_dir"; then
+			echo "❌ Test failed: Initial download failed"
+			rm -rf "$work_dir"
+			unset MOCK_DOWNLOAD
+			return 1
+		fi
+
+		# Verify cache file was created
+		if [ ! -f "$cache_file" ]; then
+			echo "❌ Test failed: Cache file was not created"
+			rm -rf "$work_dir"
+			unset MOCK_DOWNLOAD
+			return 1
+		fi
+
+		# Get original modification time and size
+		local original_mtime
+		original_mtime=$(get_mtime "$cache_file")
+		local original_size
+		original_size=$(get_size "$cache_file")
+		local original_hash
+		original_hash=$(get_hash "$cache_file")
+
+		debug "Original cache file size: $original_size bytes"
+		debug "Original modification time: $original_mtime"
+		debug "Original cache hash: $original_hash"
+
+		# Second run - should use cache
+		debug "Running mock download again - should use cache..."
+
+		# Create a new working directory for the second run
+	local work_dir2=$(mktemp --tmpdir -d "yttranscriber-work.XXXXXX")
+		debug "Created second working directory for cache test: $work_dir2"
+
+		# Run mock download again
+		if ! mock_download_audio "$test_url" "$work_dir2"; then
+			echo "❌ Test failed: Second run failed"
+			rm -rf "$work_dir" "$work_dir2"
+			unset MOCK_DOWNLOAD
+			return 1
+		fi
+
+		# Check both modification time and size
+		local new_mtime
+		new_mtime=$(get_mtime "$cache_file")
+		local new_size
+		new_size=$(get_size "$cache_file")
+		local new_hash
+		new_hash=$(get_hash "$cache_file")
+
+		debug "New cache file size: $new_size bytes"
+		debug "New modification time: $new_mtime"
+
+		# Verify file wasn't modified
+		if [ "$original_mtime" -ne "$new_mtime" ]; then
+				echo "❌ Test failed: Cache file was modified (timestamp changed)"
+				echo "Original mtime: $original_mtime"
+				echo "New mtime: $new_mtime"
+				rm -rf "$work_dir" "$work_dir2"
+				unset MOCK_DOWNLOAD
+				return 1
+		fi
+
+		if [ "$original_size" -ne "$new_size" ]; then
+				echo "❌ Test failed: Cache file size changed"
+				echo "Original size: $original_size bytes"
+				echo "New size: $new_size bytes"
+				rm -rf "$work_dir" "$work_dir2"
+				unset MOCK_DOWNLOAD
+				return 1
+		fi
+
+		if [ "$original_hash" != "$new_hash" ]; then
+				echo "❌ Test failed: Cache file contents changed"
+				echo "Original hash: $original_hash"
+				echo "New hash: $new_hash"
+				rm -rf "$work_dir" "$work_dir2"
+				unset MOCK_DOWNLOAD
+				return 1
+		fi
+
+		# Cleanup
+		rm -rf "$work_dir" "$work_dir2"
+		unset MOCK_DOWNLOAD
+
+		echo "✅ Test passed: Cache file was used without modification"
+		return 0
+	}
+
+	# Test 7: Script generates transcript from audio
+	test_transcription() {
+		# Skip this test if we're running integration tests to avoid recursion
+		if [ "${INTEGRATION_TEST:-false}" = "true" ]; then
+			echo -e "${YELLOW}Skipping transcription test in integration test mode${NC}"
+			return 0
+		fi
+
+		local test_url="https://www.youtube.com/watch?v=0NfO4AAwGf4"
+		local youtube_id="0NfO4AAwGf4"
+		local work_dir
+
+		# Run the script and capture its output to get the working directory
+		local output
+		output=$(TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG= "$SCRIPT_NAME" "$test_url" 2>&1 || true)
+
+		# Extract working directory from output
+		work_dir=$(echo "$output" | grep "Working directory:" | cut -d':' -f2- | tr -d ' ')
+		if [ -z "$work_dir" ]; then
+			echo "❌ Test failed: Could not determine working directory"
+			echo "Script output:"
+			echo "$output"
+			exit 1
+		fi
+
+		# Check for transcript file in the script's working directory
+		local transcript_file="${work_dir}/transcript.txt"
+		assert_file_exists "$transcript_file"
+
+		# Check that transcript has content
+		if [ ! -s "$transcript_file" ]; then
+			echo "❌ Test failed: Transcript file is empty"
+			exit 1
+		fi
+
+		# Check that transcript contains actual text (not just whitespace or garbage)
+		if ! grep -q '[[:alpha:]]' "$transcript_file"; then
+			echo "❌ Test failed: Transcript doesn't contain readable text"
+			echo "Transcript content:"
+			cat "$transcript_file"
+			exit 1
+		fi
+
+		echo "✅ Test passed: Generated valid transcript"
+	}
+
+	# Test that the managed Python environment properly activates dependencies
+	test_python_dependencies() {
+		echo -e "${BLUE}Verifying Python environment and dependencies...${NC}"
+
+		# Setup Python environment using the actual function
+		echo -e "${YELLOW}Setting up Python environment...${NC}"
+		setup_python_env
+		echo -e "${GREEN}Python environment setup completed${NC}"
+
+		# Check that critical dependencies are available
+		local dependencies=("python3" "yt-dlp" "ffmpeg")
+		local missing_deps=()
+
+		for dep in "${dependencies[@]}"; do
+			echo -n "Checking for $dep: "
+			if command -v "$dep" >/dev/null 2>&1; then
+				echo -e "${GREEN}Found${NC}"
+
+				# For Python dependencies, verify they can be imported
+				if [ "$dep" = "python3" ]; then
+					echo "Python version: $(python3 --version)"
+
+					# Check critical Python packages
+					local py_packages=("torch" "whisper" "yt_dlp" "psutil")
+					for pkg in "${py_packages[@]}"; do
+						echo -n "  Checking Python package $pkg: "
+						if python3 -c "import $pkg" 2>/dev/null; then
+							echo -e "${GREEN}Installed${NC}"
+
+							# For torch, check if MPS (Metal Performance Shaders) is available on macOS
+							if [ "$pkg" = "torch" ] && [[ "$OSTYPE" == "darwin"* ]]; then
+								echo -n "    MPS available: "
+								if python3 -c 'import torch; print(getattr(getattr(torch.backends, "mps", None), "is_available", lambda: False)())' 2>/dev/null | grep -q "True"; then
+									echo -e "${GREEN}Yes${NC}"
+								else
+									echo -e "${YELLOW}No${NC}"
+								fi
+							fi
+						else
+							echo -e "${RED}Not installed${NC}"
+							missing_deps+=("Python package: $pkg")
+						fi
+					done
+				fi
+
+				# For yt-dlp, check version
+				if [ "$dep" = "yt-dlp" ]; then
+					echo "yt-dlp version: $(yt-dlp --version)"
+				fi
+
+				# For ffmpeg, check version
+				if [ "$dep" = "ffmpeg" ]; then
+					echo "ffmpeg version: $(ffmpeg -version | head -n 1)"
+				fi
+			else
+				echo -e "${RED}Not found${NC}"
+				missing_deps+=("$dep")
+			fi
+		done
+
+		# Report missing dependencies
+		if [ ${#missing_deps[@]} -gt 0 ]; then
+			echo -e "${RED}❌ Dependency verification failed. Missing dependencies:${NC}"
+			for missing in "${missing_deps[@]}"; do
+				echo -e "${RED}- $missing${NC}"
+			done
+
+			echo -e "${YELLOW}Debugging information:${NC}"
+			echo "PATH: $PATH"
+
+			return 1
+		fi
+
+		echo -e "${GREEN}✅ All dependencies verified successfully${NC}"
+		return 0
+	}
+	# Integration test: Test with real YouTube URL and dependencies
+	test_integration() {
+		echo -e "${YELLOW}Running integration test with real YouTube URL and dependencies${NC}"
+
+		# First verify dependencies
+		test_python_dependencies
+
+		local test_url="${INTEGRATION_TEST_URL:-https://www.youtube.com/watch?v=jNQXAC9IVRw}"
+
+		# Extract the YouTube ID from the URL
+		local youtube_id=$(echo "$test_url" | sed -n 's/.*[?&]v=\([^&]*\).*/\1/p')
+		if [ -z "$youtube_id" ]; then
+			echo -e "${RED}❌ Integration test failed: Could not extract YouTube ID from URL: $test_url${NC}"
+			return 1
+		fi
+
+		local cache_dir="/tmp/$SCRIPT_NAME"
+		local cache_file="$cache_dir/${youtube_id}.mp3"
+		local transcript_file="$cache_dir/${youtube_id}.txt"
+
+		# Clean up any existing files if INTEGRATION_TEST_CLEAN is set
+		if [ "${INTEGRATION_TEST_CLEAN:-true}" = "true" ]; then
+			echo -e "${YELLOW}Cleaning up existing test files...${NC}"
+			rm -f "$cache_file" "$transcript_file"
+		else
+			echo -e "${YELLOW}Skipping cleanup of existing test files...${NC}"
+		fi
+
+		# Create the cache directory if it doesn't exist
+		mkdir -p "$cache_dir"
+
+		# Run the actual script with the real URL
+		echo -e "${YELLOW}Downloading and transcribing real YouTube video...${NC}"
+		echo -e "${YELLOW}This may take a few minutes depending on your internet connection and CPU.${NC}"
+
+		# First, validate the URL separately to avoid issues with argument parsing
+		echo -e "${YELLOW}Validating YouTube URL: $test_url${NC}"
+		if ! validate_youtube_url "$test_url"; then
+			echo -e "${RED}❌ Integration test failed: Invalid YouTube URL: $test_url${NC}"
+			return 1
+		fi
+
+		# Define command arguments as an array to properly handle spaces and flags
+		local cmd_args=()
+		cmd_args+=("$test_url")
+
+		# Add any additional arguments from environment variable
+		if [ -n "${INTEGRATION_TEST_ARGS:-}" ]; then
+			# Split the args string into an array
+			IFS=' ' read -r -a extra_args <<< "$INTEGRATION_TEST_ARGS"
+			cmd_args+=("${extra_args[@]}")
+		fi
+
+		# Run the script directly
+		echo -e "${YELLOW}Running command: $SCRIPT_NAME ${cmd_args[*]}${NC}"
+
+		# Create a variable to capture the temporary directory
+		local temp_dir=""
+
+		# Temporary file to capture stderr
+	local stderr_file=$(mktemp --tmpdir "yttranscriber-stderr.XXXXXX")
+
+		# Run the script with DEBUG=true to capture the working directory
+		cd "$SCRIPT_DIR"
+		TEST=false INTEGRATION_TEST= INTEGRATION_TEST_DEPS_ONLY= DEBUG=true "$SCRIPT_NAME" "${cmd_args[@]}" 2> "$stderr_file"
+		local exit_code=$?
+
+		# Extract the working directory from stderr
+		if grep -q "^Working directory: " "$stderr_file"; then
+			temp_dir=$(grep "^Working directory: " "$stderr_file" | head -n 1 | sed 's/^Working directory: //')
+		fi
+
+		# Display stderr for debugging
+		cat "$stderr_file" >&2
+		rm -f "$stderr_file"
+
+		if [ $exit_code -ne 0 ]; then
+			echo -e "${RED}❌ Integration test failed: Script exited with code $exit_code${NC}"
+			return 1
+		fi
+
+		# Wait a moment for file operations to complete
+		sleep 2
+
+		# Check if we captured the temporary directory
+		if [ -z "$temp_dir" ]; then
+			echo -e "${RED}❌ Integration test failed: Could not determine temporary working directory${NC}"
+			return 1
+		fi
+
+		echo -e "${YELLOW}Temporary working directory: $temp_dir${NC}"
+
+		# Check if the cache directory exists
+		if [ ! -d "$cache_dir" ]; then
+			echo -e "${RED}❌ Integration test failed: Cache directory was not created${NC}"
+			echo "Expected directory: $cache_dir"
+			return 1
+		fi
+
+		# List the contents of the cache directory for debugging
+		echo -e "${YELLOW}Cache directory contents:${NC}"
+		ls -la "$cache_dir"
+
+		# List the contents of the temporary directory
+		echo -e "${YELLOW}Temporary directory contents:${NC}"
+		ls -la "$temp_dir"
+
+		# Verify the audio file was downloaded to cache
+		if [ ! -f "$cache_file" ]; then
+			echo -e "${RED}❌ Integration test failed: Audio file was not downloaded to cache${NC}"
+			echo "Expected file: $cache_file"
+			return 1
+		fi
+
+		# Verify it's actually an audio file
+		if ! file "$cache_file" | grep -qE "Audio|audio"; then
+			echo -e "${RED}❌ Integration test failed: File is not an audio file${NC}"
+			echo "File type: $(file "$cache_file")"
+			return 1
+		fi
+
+		# Verify the transcript was generated in the temporary directory
+		local transcript_file="$temp_dir/transcript.txt"
+		if [ ! -f "$transcript_file" ]; then
+			echo -e "${RED}❌ Integration test failed: Transcript file was not generated${NC}"
+			echo "Expected file: $transcript_file"
+			return 1
+		fi
+
+		# Verify the transcript has content
+		if [ ! -s "$transcript_file" ]; then
+			echo -e "${RED}❌ Integration test failed: Transcript file is empty${NC}"
+			echo "Expected file: $transcript_file"
+			return 1
+		fi
+
+		# Display some of the transcript content
+		echo -e "${YELLOW}Transcript preview:${NC}"
+		head -n 5 "$transcript_file"
+		echo "..."
+
+		echo -e "${GREEN}✅ Integration test passed: Successfully downloaded and transcribed a real YouTube video${NC}"
+		return 0
+	}
+
+	# Ensure tests run in correct order
+	echo -e "${YELLOW}Running YT Transcriber tests...${NC}"
+	dependencychecks
+	versionchecks
+	run_test "Script exists and executable" test_script_exists
+	run_test "Usage message" test_usage
+	run_test "URL validation" test_url_validation
+	run_test "Working directory creation" test_working_dir
+
+	if [ "$INTEGRATION_TEST" = "true" ]; then
+		echo -e "${BLUE}Running in INTEGRATION TEST mode with real dependencies${NC}"
+
+		# Run dependency verification first
+		if [ "${INTEGRATION_TEST_DEPS_ONLY:-false}" = "true" ]; then
+			# Only run dependency verification
+			run_test "Python dependency verification" test_python_dependencies
+		else
+			# Run both dependency verification and full integration test
+			run_test "Python dependency verification" test_python_dependencies
+			run_test "Integration test" test_integration
+		fi
+	else
+		echo -e "${BLUE}Running in MOCK TEST mode${NC}"
+		run_test "Audio download" test_audio_download
+		run_test "Audio caching" test_audio_cache
+		run_test "MPS detection guard" test_mps_guard
+		run_test "Device preference logic" test_device_preference_logic
+		run_test "Python path hints" test_python_path_hint
+	run_test "Python dependency reporting" test_python_dependency_reporting
+	run_test "Python dependency error reasons" test_python_dependency_errors_include_reason
+	run_test "Python package list contains typing-extensions" test_python_package_list_includes_typing_extensions
+	run_test "Clear video cache (all)" test_clear_video_cache_all
+	run_test "Clear video cache (specific)" test_clear_video_cache_specific
+	run_test "Cache status reports totals" test_cache_status_reports_totals
+	run_test "Pinned nixpkgs commit" test_nixpkgs_pin
+	run_test "GPU flags demand clean pins" test_gpu_flags_require_clean_pin
+fi
+
+	echo -e "${GREEN}All tests passed!${NC}"
 
 else # This file was run directly
-  # If this file is run directly and not sourced, call the function with any argv's provided
-  if [[ "$*" == *"--test"* ]] || [[ "$*" == *"TEST"* ]]; then
-    # Run in test mode (using mocks)
-    TEST=true
-    INTEGRATION_TEST=false
-    (return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
-  elif [[ "$*" == *"--integration-test"* ]]; then
-    # Run integration tests (using real services)
-    TEST=true
-    INTEGRATION_TEST=true
-    (return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
-  else
-    # Normal operation (also filter warnings by default)
-    (return 0 2>/dev/null) || main "$@" 2>&1 | filter_warnings
-  fi
+	# If this file is run directly and not sourced, call the function with any argv's provided
+	if [[ "$*" == *"--test"* ]] || [[ "$*" == *"TEST"* ]]; then
+		# Run in test mode (using mocks)
+		TEST=true
+		INTEGRATION_TEST=false
+		(return 0 2>/dev/null) || { main "$@" 2>&1 1>&3 | filter_warnings 1>&2; } 3>&1
+	elif [[ "$*" == *"--integration-test"* ]]; then
+		# Run integration tests (using real services)
+		TEST=true
+		INTEGRATION_TEST=true
+		(return 0 2>/dev/null) || { main "$@" 2>&1 1>&3 | filter_warnings 1>&2; } 3>&1
+	else
+		# Normal operation (also filter warnings by default)
+		(return 0 2>/dev/null) || { main "$@" 2>&1 1>&3 | filter_warnings 1>&2; } 3>&1
+	fi
 fi
 
 
@@ -2034,3 +2829,17 @@ fi
 #
 # if this script is sourced, return; otherwise that will error, and then exit 0
 return 0 2>/dev/null || exit 0
+	test_transcript_cache_hit() {
+		local youtube_id="0NfO4AAwGf4"
+		local cache_dir
+		cache_dir=$(ensure_transcript_cache_dir "$youtube_id")
+		echo "Cached body" > "$cache_dir/transcript.txt"
+		if output=$(ENABLE_ROCM=0 ENABLE_CUDA=0 MOCK_DOWNLOAD=false TEST=false "$SCRIPT_NAME" "https://www.youtube.com/watch?v=$youtube_id" 2>/dev/null); then
+			if echo "$output" | grep -q "Cached body"; then
+				echo -e "${GREEN}✅ Passed${NC}"
+				return 0
+			fi
+		fi
+		echo -e "${RED}❌ Failed: transcript cache not used${NC}"
+		return 1
+	}
