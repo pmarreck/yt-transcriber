@@ -163,3 +163,5 @@ cython_debug/
 
 .DS_Store
 last_transcript.txt
+AGENTS*.md
+CLAUDE*.md
